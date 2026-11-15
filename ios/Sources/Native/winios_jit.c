@@ -84,6 +84,7 @@ static struct sigaction g_prev_sigbus;
 static WinIosDualMapping g_mapping;
 static void *g_guest_ram;
 static uint64_t g_guest_ram_bytes;
+static uint64_t g_requested_guest_mb = 4096;
 static atomic_bool g_jit_live;
 static char g_status[256] = "Not initialized";
 
@@ -93,11 +94,10 @@ static void prealloc_ledger_exempt_ram(void) {
     size_t len = sizeof phys_mem;
     sysctlbyname("hw.memsize", &phys_mem, &len, NULL, 0);
     uint64_t phys_mb = phys_mem >> 20;
-    /* Size Guest RAM to fit comfortably within iOS 36-bit user VA ceiling alongside TXM JIT RX/RW + JIT tables */
-    static const uint64_t candidates_mb[] = {4608, 4096, 3584, 3072, 2560, 2048};
-    for (size_t i = 0; i < sizeof(candidates_mb) / sizeof(candidates_mb[0]); i++) {
-        uint64_t mb = candidates_mb[i];
-        if (phys_mb > 0 && mb + 2560 > phys_mb) continue;
+    /* Reserve the configured Windows 11 minimum or larger, without silently
+     * shrinking the guest or assuming the memory ledger exception will work. */
+    uint64_t mb = g_requested_guest_mb;
+    if (mb >= 4096 && mb <= 4608 && phys_mb >= mb + 3072) {
         uint8_t *p = hv_alloc_no_footprint(mb << 20);
         if (p) {
             g_guest_ram = p;
@@ -108,6 +108,11 @@ static void prealloc_ledger_exempt_ram(void) {
         }
     }
     WINIOS_LOG("ledger-exempt Guest RAM pre-allocation unavailable; will fall back at VM start");
+}
+
+void winios_jit_set_guest_memory_mb(uint64_t memory_mb) {
+    if (memory_mb >= 4096 && memory_mb <= 4608 && memory_mb % 256 == 0)
+        g_requested_guest_mb = memory_mb;
 }
 
 static void set_status(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

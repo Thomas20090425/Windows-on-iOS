@@ -400,6 +400,11 @@ void hv_net_poll(void) {
 }
 
 int hv_net_attach(HvMachine *m, HvVirtioNet *n) {
+    return hv_net_attach_with_forward(m, n, 0, 0);
+}
+
+int hv_net_attach_with_forward(HvMachine *m, HvVirtioNet *n, int host_port, int guest_port) {
+    if ((host_port || guest_port) && (host_port < 1024 || host_port > 65535 || guest_port < 1 || guest_port > 65535)) return -1;
     machine = m;
     pthread_mutex_init(&to_guest.mu, NULL);
     pthread_mutex_init(&to_host.mu, NULL);
@@ -420,6 +425,19 @@ int hv_net_attach(HvMachine *m, HvVirtioNet *n) {
     cfg.if_mru = 1500;
     slirp = slirp_new(&cfg, &callbacks, NULL);
     if (!slirp) return -1;
+    if (host_port) {
+        struct in_addr host_addr, guest_addr;
+        inet_pton(AF_INET, "127.0.0.1", &host_addr);
+        inet_pton(AF_INET, "10.0.2.15", &guest_addr);
+        if (slirp_add_hostfwd(slirp, 0, host_addr, host_port, guest_addr, guest_port) != 0) {
+            fprintf(stderr, "winvm: cannot bind configured loopback TCP forward %d\n", host_port);
+            slirp_cleanup(slirp);
+            slirp = NULL;
+            close(wake_pipe[0]); close(wake_pipe[1]);
+            wake_pipe[0] = wake_pipe[1] = -1;
+            return -1;
+        }
+    }
     if (getenv("HV_NET_FWD")) { /* debugging: "hostport:guestport", from this Mac's loopback into the guest */
         int hp, gp;
         struct in_addr h, g;

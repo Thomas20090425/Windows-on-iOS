@@ -70,11 +70,12 @@ static const uint8_t kbd_config_desc[34] = {
 };
 
 /* ---- Port 2: USB HID Absolute Tablet (QEMU USB Tablet 0627:0001 style) ----
-   6-byte report:
+   7-byte report:
      byte 0: buttons (bit 0 = Left, bit 1 = Right, bit 2 = Middle)
      byte 1..2: X (0..32767, absolute)
      byte 3..4: Y (0..32767, absolute)
      byte 5: Wheel (-127..127, relative)
+     byte 6: Consumer AC Pan (-127..127, relative)
 */
 static const uint8_t tab_report_desc[] = {
     0x05, 0x01,             /* Usage Page (Generic Desktop) */
@@ -107,6 +108,9 @@ static const uint8_t tab_report_desc[] = {
     0x75, 0x08,             /*     Report Size (8) */
     0x95, 0x01,             /*     Report Count (1) */
     0x81, 0x06,             /*     Input (Data,Var,Rel) */
+    0x05, 0x0c,             /*     Usage Page (Consumer) */
+    0x0a, 0x38, 0x02,       /*     Usage (AC Pan) */
+    0x81, 0x06,             /*     Input (Data,Var,Rel), same signed 8-bit range */
     0xc0,                   /*   End Collection */
     0xc0,                   /* End Collection */
 };
@@ -312,7 +316,7 @@ static int control(HvXhci *x, HvXhciSlot *sl, const uint8_t setup[8], uint8_t *o
         tmp[0] = 0;
         src = tmp, len = 1;
     } else if (type == 0xa1 && req == 1) { /* GET_REPORT */
-        if (is_tab) src = x->tab_state, len = 6;
+        if (is_tab) src = x->tab_state, len = sizeof x->tab_state;
         else src = x->state, len = 8;
     } else if (type == 0xa1 && req == 2) { /* GET_IDLE */
         tmp[0] = sl->idle;
@@ -490,7 +494,7 @@ static void run_ep_in(HvXhci *x) {
         int slot = x->tab_slot;
         while (x->thead != x->ttail) {
             const uint8_t *rep = x->tab_reports[x->thead % HV_XHCI_REPORTS];
-            if (!deliver_hid_in(x, slot, rep, 6)) break;
+            if (!deliver_hid_in(x, slot, rep, sizeof x->tab_state)) break;
             x->thead++;
             x->delivered++;
             if (xlog() && x->delivered <= 24)
@@ -912,13 +916,20 @@ void hv_xhci_key(HvXhci *x, uint8_t usage, int down) {
             s[7] = 0;
         }
     }
-    if (x->rtail - x->rhead < HV_XHCI_REPORTS)
-        memcpy(x->reports[x->rtail++ % HV_XHCI_REPORTS], s, 8);
+    /* Keep the latest complete key state even under an input burst. In particular,
+       never drop a release and leave a modifier held indefinitely. */
+    if (x->rtail - x->rhead >= HV_XHCI_REPORTS) x->rhead++;
+    memcpy(x->reports[x->rtail++ % HV_XHCI_REPORTS], s, 8);
     pthread_mutex_unlock(&x->mu);
     hv_machine_wake(x->m);
 }
 
 void hv_xhci_tablet(HvXhci *x, int abs_x, int abs_y, uint8_t buttons, int8_t wheel) {
+    hv_xhci_tablet_scroll(x, abs_x, abs_y, buttons, wheel, 0);
+}
+
+void hv_xhci_tablet_scroll(HvXhci *x, int abs_x, int abs_y, uint8_t buttons,
+                          int8_t wheel, int8_t horizontal_wheel) {
     if (!x) return;
     if (abs_x < 0) abs_x = 0;
     if (abs_x > 32767) abs_x = 32767;
@@ -926,27 +937,29 @@ void hv_xhci_tablet(HvXhci *x, int abs_x, int abs_y, uint8_t buttons, int8_t whe
     if (abs_y > 32767) abs_y = 32767;
 
     pthread_mutex_lock(&x->mu);
-    uint8_t rep[6];
+    uint8_t rep[7];
     rep[0] = buttons & 0x07;
     rep[1] = (uint8_t)(abs_x & 0xff);
     rep[2] = (uint8_t)((abs_x >> 8) & 0xff);
     rep[3] = (uint8_t)(abs_y & 0xff);
     rep[4] = (uint8_t)((abs_y >> 8) & 0xff);
     rep[5] = (uint8_t)wheel;
-    memcpy(x->tab_state, rep, 6);
+    rep[6] = (uint8_t)horizontal_wheel;
+    memcpy(x->tab_state, rep, sizeof rep);
+    x->tab_state[5] = x->tab_state[6] = 0; /* relative axes are impulses */
 
     /* Coalesce pure motion updates if queue has unconsumed entries and buttons/wheel match */
-    if (!wheel && x->ttail > x->thead) {
+    if (!wheel && !horizontal_wheel && x->ttail > x->thead) {
         uint8_t *prev = x->tab_reports[(x->ttail - 1) % HV_XHCI_REPORTS];
-        if (prev[0] == rep[0] && prev[5] == 0) {
-            memcpy(prev, rep, 6);
+        if (prev[0] == rep[0] && prev[5] == 0 && prev[6] == 0) {
+            memcpy(prev, rep, sizeof rep);
             pthread_mutex_unlock(&x->mu);
             hv_machine_wake(x->m);
             return;
         }
     }
-    if (x->ttail - x->thead < HV_XHCI_REPORTS)
-        memcpy(x->tab_reports[x->ttail++ % HV_XHCI_REPORTS], rep, 6);
+    if (x->ttail - x->thead >= HV_XHCI_REPORTS) x->thead++;
+    memcpy(x->tab_reports[x->ttail++ % HV_XHCI_REPORTS], rep, sizeof rep);
     pthread_mutex_unlock(&x->mu);
     hv_machine_wake(x->m);
 }

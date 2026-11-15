@@ -4,6 +4,7 @@ work/
 ios/deps/
 ios/*.xcodeproj
 ios/DerivedData/
+distribution/
 
 # App bundles & object archives
 *.ipa

@@ -134,6 +134,7 @@ final class VMViewModel: ObservableObject {
     }
 
     func isLaptopLayoutActive(for size: CGSize) -> Bool {
+        if UIDevice.current.userInterfaceIdiom == .pad { return false }
         switch postureMode {
         case .laptop:
             return true
@@ -240,11 +241,13 @@ final class VMViewModel: ObservableObject {
 
     func onAppBecameActive() {
         let b = WinIOSBridge.shared
-        if !b.isJITLive && b.isDebuggerAttached {
+        // iPad selects a machine and its RAM reservation before requesting JIT.
+        // Acquiring here would reserve default RAM before library selection.
+        if UIDevice.current.userInterfaceIdiom != .pad && !b.isJITLive && b.isDebuggerAttached {
             _ = b.tryAcquireJIT(true)
         }
         syncFromBridge()
-        if b.isJITLive && !b.isVMRunning && !b.isUnpacking && b.hasProvisionedMachine() && !didAutoLaunchAttempt {
+        if UIDevice.current.userInterfaceIdiom != .pad && b.isJITLive && !b.isVMRunning && !b.isUnpacking && b.hasProvisionedMachine() && !didAutoLaunchAttempt {
             didAutoLaunchAttempt = true
             b.prepareAndStart(with: nil)
             syncFromBridge()

@@ -129,7 +129,8 @@ struct SessionView: View {
                             withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
                                 vm.postureMode = .fullScreen
                             }
-                        }
+                        },
+                        inputEnabled: vm.isVMRunning && vm.activeSafariURL == nil
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 5.5, style: .continuous))
                     .overlay(
@@ -303,7 +304,8 @@ struct SessionView: View {
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.86)) {
                         vm.controlBarVisible.toggle()
                     }
-                }
+                },
+                inputEnabled: vm.isVMRunning && vm.activeSafariURL == nil
             )
             .clipShape(RoundedRectangle(cornerRadius: 8.5, style: .continuous))
             .padding(3.5)

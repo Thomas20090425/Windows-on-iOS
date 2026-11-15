@@ -24,6 +24,7 @@ typedef struct HvFbDisplay {
     uint32_t stride;
     uint32_t fourcc; /* DRM fourcc, e.g. XR24 / AR24 (32-bit BGRX) */
     int active;
+    int presentation_hz; /* Set before Metal presenter creation; zero means 60 Hz. */
 
     /* Metal presenter handle (created lazily by fb_metal.m) */
     void *metal;

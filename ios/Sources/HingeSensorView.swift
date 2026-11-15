@@ -12,6 +12,7 @@ final class PointerController {
     var cursorY: Double = 0.5
     private(set) var heldButtons: UInt8 = 0
 
+    private var clickGeneration: UInt = 0
     private var lastTapTime: CFTimeInterval = 0
     private var lastTapX: Double = 0.5
     private var lastTapY: Double = 0.5
@@ -27,7 +28,9 @@ final class PointerController {
     func moveRelative(dxPoints: CGFloat, dyPoints: CGFloat, padWidth: CGFloat, padHeight: CGFloat, extraButtons: UInt8 = 0) {
         // Natural laptop trackpad ballistics: fine pixel control at low speed, brisk traversal on flicks.
         let dist = hypot(Double(dxPoints), Double(dyPoints))
-        let gain = min(2.35, 0.95 + dist * 0.055)
+        let preference = UserDefaults.standard.double(forKey: "pointerSensitivity")
+        let sensitivity = preference.isFinite && preference > 0 ? min(3, max(0.25, preference)) : 1
+        let gain = min(2.35, 0.95 + dist * 0.055) * sensitivity
         let refW = Double(max(220.0, padWidth))
         let refH = Double(max(130.0, padHeight))
         let dx = (Double(dxPoints) / refW) * gain
@@ -46,9 +49,16 @@ final class PointerController {
         WinIOSBridge.shared.sendTabletNormalizedX(cursorX, y: cursorY, buttons: heldButtons, wheel: 0)
     }
 
-    func scroll(steps: Int8) {
-        guard steps != 0 else { return }
-        WinIOSBridge.shared.sendTabletNormalizedX(cursorX, y: cursorY, buttons: heldButtons, wheel: steps)
+    func scroll(steps: Int8, horizontalSteps: Int8 = 0) {
+        guard steps != 0 || horizontalSteps != 0 else { return }
+        WinIOSBridge.shared.sendTabletNormalizedX(cursorX, y: cursorY, buttons: heldButtons,
+                                                  wheel: steps, horizontalWheel: horizontalSteps)
+    }
+
+    func releaseAllButtons() {
+        clickGeneration &+= 1
+        heldButtons = 0
+        WinIOSBridge.shared.sendTabletNormalizedX(cursorX, y: cursorY, buttons: 0, wheel: 0)
     }
 
     /// Direct-touch tap on the Windows display with automatic double-click coordinate snapping
@@ -68,17 +78,18 @@ final class PointerController {
         }
         lastTapTime = now
 
+        let generation = clickGeneration
         let tx = cursorX
         let ty = cursorY
         // 1. Move cursor onto target so XAML hover states engage
         WinIOSBridge.shared.sendTabletNormalizedX(tx, y: ty, buttons: heldButtons, wheel: 0)
         // 2. Press button after 14 ms
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.014) { [weak self] in
-            guard let self else { return }
+            guard let self, self.clickGeneration == generation else { return }
             WinIOSBridge.shared.sendTabletNormalizedX(tx, y: ty, buttons: self.heldButtons | buttonMask, wheel: 0)
             // 3. Release button after 55 ms
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.055) { [weak self] in
-                guard let self else { return }
+                guard let self, self.clickGeneration == generation else { return }
                 WinIOSBridge.shared.sendTabletNormalizedX(tx, y: ty, buttons: self.heldButtons, wheel: 0)
             }
         }
@@ -86,11 +97,12 @@ final class PointerController {
 
     /// Trackpad tap-to-click at the current cursor position.
     func clickAtCurrent(buttonMask: UInt8) {
+        let generation = clickGeneration
         let tx = cursorX
         let ty = cursorY
         WinIOSBridge.shared.sendTabletNormalizedX(tx, y: ty, buttons: heldButtons | buttonMask, wheel: 0)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.048) { [weak self] in
-            guard let self else { return }
+            guard let self, self.clickGeneration == generation else { return }
             WinIOSBridge.shared.sendTabletNormalizedX(tx, y: ty, buttons: self.heldButtons, wheel: 0)
         }
     }
@@ -164,6 +176,9 @@ final class HingeObserverViewController: UIViewController {
         guard !didInstallHinge else { return }
         didInstallHinge = true
         guard NSClassFromString("UIHingeInteraction") != nil else { return }
+        // Enable only when compiling with an SDK that declares UIHingeInteraction.
+        // A runtime availability check alone cannot compile an unknown SDK type.
+        #if WINIOS_HINGE_SDK
         if #available(iOS 27.1, *) {
             let interaction = UIHingeInteraction { [weak self] _, update in
                 guard let self else { return }
@@ -179,6 +194,7 @@ final class HingeObserverViewController: UIViewController {
             }
             view.addInteraction(interaction)
         }
+        #endif
     }
 }
 

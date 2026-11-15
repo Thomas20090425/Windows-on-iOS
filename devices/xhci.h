@@ -7,7 +7,7 @@
 
 /* xHCI 1.0 USB host controller (MSI-X + INTx) with:
    - Port 1: USB HID Boot Keyboard
-   - Port 2: USB HID Absolute Tablet (0..32767 X/Y, L/R/M buttons, scroll wheel)
+   - Port 2: USB HID Absolute Tablet (0..32767 X/Y, L/R/M buttons, vertical/horizontal scroll wheels)
    Zero guest drivers required in EDK2 UEFI or Windows 11 ARM64. */
 #define HV_XHCI_SLOTS 8
 #define HV_XHCI_PORTS 2
@@ -57,10 +57,10 @@ typedef struct HvXhci {
     uint8_t reports[HV_XHCI_REPORTS][8];
     uint32_t rhead, rtail;
     uint8_t state[8];
-    /* Port 2 absolute tablet reports (6 bytes: buttons, x_lo, x_hi, y_lo, y_hi, wheel) */
-    uint8_t tab_reports[HV_XHCI_REPORTS][6];
+    /* Port 2 reports: buttons, X16, Y16, vertical wheel, horizontal AC Pan. */
+    uint8_t tab_reports[HV_XHCI_REPORTS][7];
     uint32_t thead, ttail;
-    uint8_t tab_state[6];
+    uint8_t tab_state[7];
 
     uint64_t delivered;
 } HvXhci;
@@ -72,6 +72,8 @@ void hv_xhci_key(HvXhci *x, uint8_t usage, int down);
 void hv_xhci_key_linux(HvXhci *x, uint16_t code, int down);
 /* Any thread: USB HID Absolute Tablet event (x, y in 0..32767; buttons bit0=L, bit1=R, bit2=M; wheel -127..127). */
 void hv_xhci_tablet(HvXhci *x, int abs_x, int abs_y, uint8_t buttons, int8_t wheel);
+void hv_xhci_tablet_scroll(HvXhci *x, int abs_x, int abs_y, uint8_t buttons,
+                          int8_t wheel, int8_t horizontal_wheel);
 /* CPU thread: hand waiting keyboard & tablet reports to the guest. */
 void hv_xhci_poll(HvXhci *x);
 

@@ -1,17 +1,12 @@
 #!/opt/homebrew/bin/python3
 # SPDX-License-Identifier: GPL-2.0-or-later
 """
-Build a Featherweight ("Tiny11 / IoT LTSC-grade") Windows 11 ARM64 image (`work/windows11_lite.img`)
-from `work/windows11.img` using offline WinPE DISM + offline Registry Hive surgery.
-
-Eliminates:
-  - 35+ inbox UWP consumer bloat apps + Widgets WebView2 (`Client.WebExperience`)
-  - Windows Defender real-time AV (`MsMpEng.exe`, `WdFilter.sys`, `Sense`, `SecurityHealthService`)
-  - Windows Update / Store background auto-updaters (`TiWorker.exe`, `UsoSvc`, `wuauserv`, `DoSvc`)
-  - `SysMain` (Superfetch), `WSearch` (`SearchIndexer.exe`), `DiagTrack` telemetry, `CompatTelRunner`, `WinSAT`
-  - KVA Shadow & Spectre MMU page-table trampolines (`FeatureSettingsOverride=3`)
-  - CPU-rendered `dwm.exe` Mica/Acrylic Gaussian blur & window/taskbar animations (keeps ClearType crisp fonts!)
-  - Edge background prelaunch, Bing Search WebView2, OneDrive auto-setup, stale multi-GB pagefile/hiberfil
+Optional offline Windows 11 24H2 ARM64 consumer-app and visual cleanup.
+Creates work/windows11_lite.img from the user's source image; does not run as
+part of the app build. Defender, SmartScreen, Windows Update, code integrity,
+and CPU vulnerability mitigations are preserved. No performance gain is claimed.
+The legacy opt_hive_arm64.exe helper is deliberately not invoked: it disables
+security services and mitigations. Existing images are never overwritten.
 """
 
 import os
@@ -34,163 +29,15 @@ PE_VARS = WORK / "_opt_pe_vars.fd"
 
 OPT_SYS_REG = r"""Windows Registry Editor Version 5.00
 
-; --- Memory Management: Disable KVA Shadow / Spectre MMU overhead & Executive Paging ---
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Control\Session Manager\Memory Management]
-"FeatureSettingsOverride"=dword:00000003
-"FeatureSettingsOverrideMask"=dword:00000003
-"DisablePagingExecutive"=dword:00000001
-
-; --- Snappy Foreground UI Quantum Boost ---
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Control\PriorityControl]
-"Win32PrioritySeparation"=dword:00000026
-
-; --- Disable Hibernation ---
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Control\Power]
-"HibernateEnabled"=dword:00000000
-"HibernateEnabledDefault"=dword:00000000
-
-; --- Disable Windows Defender & Filter Drivers (saves ~350 MB RAM + 35% CPU) ---
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\WinDefend]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\WdNisSvc]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\WdNisDrv]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\WdFilter]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\WdBoot]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\Sense]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\SecurityHealthService]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\wscsvc]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\MDCoreSvc]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\webthreatdefsvc]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\webthreatdefusersvc]
-"Start"=dword:00000004
-
-; --- Disable Background CPU / RAM / Disk Hogs ---
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\SysMain]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\WSearch]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\DiagTrack]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\dmwappushservice]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\WerSvc]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\PcaSvc]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\DPS]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\WdiServiceHost]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\WdiSystemHost]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\MapsBroker]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\lfsvc]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\wisvc]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\RetailDemo]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\WbioSrvc]
-"Start"=dword:00000004
-
-; --- Disable Background Windows Update & Delivery Optimization ---
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\wuauserv]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\UsoSvc]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\WaaSMedicSvc]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\DoSvc]
-"Start"=dword:00000004
-
-; --- Disable Xbox Background Services ---
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\XblAuthManager]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\XblGameSave]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\XboxGipSvc]
-"Start"=dword:00000004
-[HKEY_LOCAL_MACHINE\OFFSYS\ControlSet001\Services\XboxNetApiSvc]
-"Start"=dword:00000004
+; Windows security, service startup, mitigations and memory policy stay at defaults.
 """
 
 OPT_SOFT_REG = r"""Windows Registry Editor Version 5.00
 
-; --- Windows Defender Group Policies ---
-[HKEY_LOCAL_MACHINE\OFFSOFT\Policies\Microsoft\Windows Defender]
-"DisableAntiSpyware"=dword:00000001
-"DisableRoutinelyTakingAction"=dword:00000001
-
-[HKEY_LOCAL_MACHINE\OFFSOFT\Policies\Microsoft\Windows Defender\Real-Time Protection]
-"DisableRealtimeMonitoring"=dword:00000001
-"DisableBehaviorMonitoring"=dword:00000001
-"DisableOnAccessProtection"=dword:00000001
-"DisableScanOnRealtimeEnable"=dword:00000001
-
-[HKEY_LOCAL_MACHINE\OFFSOFT\Policies\Microsoft\Windows Defender\Spynet]
-"SpynetReporting"=dword:00000000
-"SubmitSamplesConsent"=dword:00000002
-
-[HKEY_LOCAL_MACHINE\OFFSOFT\Microsoft\Windows Defender\Features]
-"TamperProtection"=dword:00000000
-
-; --- Windows Update & Store Auto-Download Off ---
-[HKEY_LOCAL_MACHINE\OFFSOFT\Policies\Microsoft\Windows\WindowsUpdate\AU]
-"NoAutoUpdate"=dword:00000001
-"AUOptions"=dword:00000002
-
-[HKEY_LOCAL_MACHINE\OFFSOFT\Policies\Microsoft\WindowsStore]
-"AutoDownload"=dword:00000002
-
-; --- Disable Cloud Content, Consumer App Silent Installs, Widgets, Copilot, Telemetry ---
-[HKEY_LOCAL_MACHINE\OFFSOFT\Policies\Microsoft\Windows\CloudContent]
-"DisableWindowsConsumerFeatures"=dword:00000001
-"DisableSoftLanding"=dword:00000001
-"DisableCloudOptimizedContent"=dword:00000001
-
-[HKEY_LOCAL_MACHINE\OFFSOFT\Policies\Microsoft\Dsh]
-"AllowNewsAndInterests"=dword:00000000
-
-[HKEY_LOCAL_MACHINE\OFFSOFT\Policies\Microsoft\Windows\WindowsCopilot]
-"TurnOffWindowsCopilot"=dword:00000001
-
-[HKEY_LOCAL_MACHINE\OFFSOFT\Policies\Microsoft\Windows\DataCollection]
-"AllowTelemetry"=dword:00000000
-"MaxTelemetryAllowed"=dword:00000000
-
-[HKEY_LOCAL_MACHINE\OFFSOFT\Policies\Microsoft\Windows\Explorer]
-"DisableSearchBoxSuggestions"=dword:00000001
-
-[HKEY_LOCAL_MACHINE\OFFSOFT\Microsoft\Windows\CurrentVersion\Explorer]
-"SmartScreenEnabled"="Off"
-
-[HKEY_LOCAL_MACHINE\OFFSOFT\Policies\Microsoft\Windows\System]
-"EnableSmartScreen"=dword:00000000
-
-; --- Prevent Microsoft Edge from Pre-Spawning Background WebView Processes ---
+; Keep Edge available, but avoid launching it before the user opens it.
 [HKEY_LOCAL_MACHINE\OFFSOFT\Policies\Microsoft\Edge]
 "StartupBoostEnabled"=dword:00000000
 "BackgroundModeEnabled"=dword:00000000
-"HubsSidebarEnabled"=dword:00000000
-
-; --- Disable Automatic Idle Maintenance Tasks ---
-[HKEY_LOCAL_MACHINE\OFFSOFT\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance]
-"MaintenanceDisabled"=dword:00000001
-
-; --- Remove Startup Tray Bloat ---
-[HKEY_LOCAL_MACHINE\OFFSOFT\Microsoft\Windows\CurrentVersion\Run]
-"SecurityHealth"=-
-"OneDriveSetup"=-
 """
 
 
@@ -288,7 +135,7 @@ set "LOGFILE=X:\opt_progress.log"
 if not "%ESPDRV%"=="" set "LOGFILE=%ESPDRV%\EFI_HOLD\opt_progress.log"
 
 echo ===================================================================== > "%LOGFILE%"
-echo   Windows 11 ARM64 Featherweight ("Tiny11 / LTSC-Lite") Optimizer >> "%LOGFILE%"
+echo   Windows 11 ARM64 Windows 11 24H2 Optional Consumer-App Cleanup >> "%LOGFILE%"
 echo ===================================================================== >> "%LOGFILE%"
 type X:\mount.log >> "%LOGFILE%"
 
@@ -341,10 +188,10 @@ for %%P in (
 )
 echo [2/5] Removed !REMOVED_COUNT! provisioned consumer Appx packages! >> "%LOGFILE%"
 
-echo [3/5] Applying offline SYSTEM and SOFTWARE hive optimizations via opt_hive_arm64.exe... >> "%LOGFILE%"
+echo [3/5] Applying optional visual and background-launch preferences... >> "%LOGFILE%"
 reg load HKLM\OFFSYS "%WINDRV%\Windows\System32\config\SYSTEM" >> "%LOGFILE%" 2>&1
 reg load HKLM\OFFSOFT "%WINDRV%\Windows\System32\config\SOFTWARE" >> "%LOGFILE%" 2>&1
-X:\Windows\System32\opt_hive_arm64.exe >> "%LOGFILE%" 2>&1
+reg import X:\Windows\System32\opt_sys.reg >> "%LOGFILE%" 2>&1
 reg import X:\Windows\System32\opt_soft.reg >> "%LOGFILE%" 2>&1
 reg unload HKLM\OFFSOFT >> "%LOGFILE%" 2>&1
 reg unload HKLM\OFFSYS >> "%LOGFILE%" 2>&1
@@ -361,30 +208,11 @@ if exist "%WINDRV%\Users\Default\NTUSER.DAT" (
     reg unload HKLM\OFFDEF >> "%LOGFILE%" 2>&1
 )
 
-echo [5/5] Neutralizing background telemetry binaries and cleaning stale swap/hiberfil... >> "%LOGFILE%"
-for %%F in (OneDriveSetup.exe CompatTelRunner.exe WinSAT.exe) do (
-    if exist "%WINDRV%\Windows\System32\%%F" (
-        takeown /f "%WINDRV%\Windows\System32\%%F" /a >> "%LOGFILE%" 2>&1
-        icacls "%WINDRV%\Windows\System32\%%F" /grant Administrators:F >> "%LOGFILE%" 2>&1
-        ren "%WINDRV%\Windows\System32\%%F" "%%F.bak" >> "%LOGFILE%" 2>&1
-    )
-)
-if exist "%WINDRV%\Windows\SysWOW64\OneDriveSetup.exe" (
-    takeown /f "%WINDRV%\Windows\SysWOW64\OneDriveSetup.exe" /a >> "%LOGFILE%" 2>&1
-    icacls "%WINDRV%\Windows\SysWOW64\OneDriveSetup.exe" /grant Administrators:F >> "%LOGFILE%" 2>&1
-    ren "%WINDRV%\Windows\SysWOW64\OneDriveSetup.exe" "OneDriveSetup.exe.bak" >> "%LOGFILE%" 2>&1
-)
-
-attrib -h -s -r "%WINDRV%\pagefile.sys" >nul 2>&1
-del /f /q "%WINDRV%\pagefile.sys" >> "%LOGFILE%" 2>&1
-attrib -h -s -r "%WINDRV%\swapfile.sys" >nul 2>&1
-del /f /q "%WINDRV%\swapfile.sys" >> "%LOGFILE%" 2>&1
-attrib -h -s -r "%WINDRV%\hiberfil.sys" >nul 2>&1
-del /f /q "%WINDRV%\hiberfil.sys" >> "%LOGFILE%" 2>&1
+echo [5/5] Preserving system binaries, security settings and swap files. >> "%LOGFILE%"
 
 echo RemovedAppx=!REMOVED_COUNT! > "%WINDRV%\LiteOptDone.txt"
 if not "%ESPDRV%"=="" echo RemovedAppx=!REMOVED_COUNT! > "%ESPDRV%\EFI_HOLD\LiteOptDone.txt"
-echo [DONE] Featherweight optimization complete (removed !REMOVED_COUNT! Appx packages)! Shutting down WinPE... >> "%LOGFILE%"
+echo [DONE] Optional consumer-app cleanup complete (removed !REMOVED_COUNT! Appx packages)! Shutting down WinPE... >> "%LOGFILE%"
 wpeutil shutdown
 goto :eof
 """
@@ -466,10 +294,7 @@ def build_opt_winpe():
             "opt_usr.reg": make_user_reg("OFFUSR"),
             "opt_def.reg": make_user_reg("OFFDEF"),
         }
-        opt_exe = ROOT / "build" / "opt_hive_arm64.exe"
-        if not opt_exe.exists():
-            raise RuntimeError(f"Missing {opt_exe}")
-        wim_cmds = [f"add '{opt_exe}' '/Windows/System32/opt_hive_arm64.exe'"]
+        wim_cmds = []
         for name, content in files.items():
             p = stage / name
             p.write_bytes(content.replace("\r\n", "\n").replace("\n", "\r\n").encode("ascii"))
@@ -536,7 +361,8 @@ def main():
         sys.exit(f"Missing {WINVM}")
 
     print(f"Cloning {SRC_IMG} -> {LITE_IMG} via APFS copy-on-write...", flush=True)
-    LITE_IMG.unlink(missing_ok=True)
+    if LITE_IMG.exists():
+        sys.exit(f"Refusing to overwrite {LITE_IMG}; choose a backup location first.")
     run(["cp", "-c", SRC_IMG, LITE_IMG])
 
     build_opt_winpe()
@@ -549,7 +375,7 @@ def main():
         PE_VARS.unlink(missing_ok=True)
         (WORK / "_opt_pe.cmds").unlink(missing_ok=True)
 
-    print(f"SUCCESS: Featherweight Windows 11 ARM64 image ready at {LITE_IMG}!", flush=True)
+    print(f"SUCCESS: Windows 11 24H2 ARM64 cleanup image ready at {LITE_IMG}!", flush=True)
 
 
 if __name__ == "__main__":

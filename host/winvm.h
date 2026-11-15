@@ -24,6 +24,11 @@ typedef struct HvWinVmConfig {
     int enable_sound;
     int log;
     int stats_interval;
+    int disk0_readonly;
+    int disable_microphone;
+    int display_refresh_hz;   /* 0 = 60 Hz; supported host presentation rates: 30/60/120 */
+    int tcp_forward_host_port; /* 0 disables; otherwise loopback TCP only */
+    int tcp_forward_guest_port;
 } HvWinVmConfig;
 
 int hv_winvm_create(const HvWinVmConfig *cfg, char *err, size_t errlen);
@@ -45,11 +50,14 @@ void hv_winvm_key_linux(uint16_t code, int down);
 /* Normalized tablet pointer: x_norm, y_norm in [0.0, 1.0] mapped to 0..32767;
  * buttons: bit0=Left, bit1=Right, bit2=Middle; wheel: -127..127. */
 void hv_winvm_tablet(double x_norm, double y_norm, uint8_t buttons, int8_t wheel);
+void hv_winvm_tablet_scroll(double x_norm, double y_norm, uint8_t buttons,
+                            int8_t wheel, int8_t horizontal_wheel);
 void hv_winvm_send_ctrl_alt_del(void);
 void hv_winvm_usb_stats(int *kbd_ready, int *tab_ready, uint64_t *delivered);
 void hv_winvm_engine_stats(uint64_t *jit_used_bytes, uint64_t *jit_cap_bytes,
                            uint64_t *jit_full_flushes, uint64_t *wfi_ticks);
 int hv_winvm_share_up(void);
+int hv_winvm_network_up(void);
 
 HvMachine *hv_winvm_machine(void);
 HvWinVirt *hv_winvm_board(void);

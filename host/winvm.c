@@ -4,6 +4,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <TargetConditionals.h>
 #include <os/lock.h>
+#include <math.h>
 #include <pthread.h>
 #include <pthread/qos.h>
 #include <signal.h>
@@ -39,6 +40,7 @@ static _Atomic(HvFbDisplay *) display_fb;
 static void (*exit_cb)(int reason);
 
 int hv_winvm_share_up(void) { return share_on; }
+int hv_winvm_network_up(void) { return net_on; }
 HvMachine *hv_winvm_machine(void) { return &m; }
 HvWinVirt *hv_winvm_board(void) { return &board; }
 
@@ -157,7 +159,7 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
 
     HvDisk *d0_ptr = NULL, *d1_ptr = NULL;
     if (c->disk0 && *c->disk0) {
-        if (hv_disk_open(&disk0, c->disk0, 0, 0) != 0)
+        if (hv_disk_open(&disk0, c->disk0, 0, c->disk0_readonly) != 0)
             return fail(err, errlen, "Cannot open primary NVMe disk image.");
         d0_ptr = &disk0;
     }
@@ -189,6 +191,8 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
         return fail(err, errlen, "Cannot create virtual ARM64 Windows board (insufficient RAM or missing firmware).");
     }
     hv_winvirt_reset_cpu(&board);
+    if (board.fb) board.fb->presentation_hz = c->display_refresh_hz == 30 || c->display_refresh_hz == 120 ? c->display_refresh_hz : 60;
+    hv_audio_set_microphone_enabled(!c->disable_microphone);
 
     share_on = 0;
     if (c->share_dir && *c->share_dir && c->share_sock && *c->share_sock) {
@@ -198,7 +202,7 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
         }
     }
     if (board.net && !c->no_net) {
-        if (hv_net_attach(&m, board.net) == 0) net_on = 1;
+        if (hv_net_attach_with_forward(&m, board.net, c->tcp_forward_host_port, c->tcp_forward_guest_port) == 0) net_on = 1;
         else fprintf(stderr, "winvm: user-mode SLIRP networking unavailable\n");
     }
     if (board.hda && c->enable_sound) hv_audio_attach_hda(board.hda);
@@ -356,14 +360,19 @@ void hv_winvm_key_linux(uint16_t code, int down) {
 }
 
 void hv_winvm_tablet(double x_norm, double y_norm, uint8_t buttons, int8_t wheel) {
-    if (!board.usb) return;
+    hv_winvm_tablet_scroll(x_norm, y_norm, buttons, wheel, 0);
+}
+
+void hv_winvm_tablet_scroll(double x_norm, double y_norm, uint8_t buttons,
+                            int8_t wheel, int8_t horizontal_wheel) {
+    if (!board.usb || !isfinite(x_norm) || !isfinite(y_norm)) return;
     if (x_norm < 0.0) x_norm = 0.0;
     if (x_norm > 1.0) x_norm = 1.0;
     if (y_norm < 0.0) y_norm = 0.0;
     if (y_norm > 1.0) y_norm = 1.0;
     int ax = (int)(x_norm * 32767.0 + 0.5);
     int ay = (int)(y_norm * 32767.0 + 0.5);
-    hv_xhci_tablet(board.usb, ax, ay, buttons, wheel);
+    hv_xhci_tablet_scroll(board.usb, ax, ay, buttons, wheel, horizontal_wheel);
 }
 
 void hv_winvm_send_ctrl_alt_del(void) {

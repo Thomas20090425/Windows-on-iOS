@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import SwiftUI
+import UIKit
 
 @main
 struct WindowsiOSApp: App {
@@ -8,7 +9,13 @@ struct WindowsiOSApp: App {
 
     var body: some Scene {
         WindowGroup {
-            SessionView(vm: viewModel)
+            Group {
+                if UIDevice.current.userInterfaceIdiom == .pad {
+                    VMLibraryView(vm: viewModel)
+                } else {
+                    SessionView(vm: viewModel)
+                }
+            }
                 .preferredColorScheme(.dark)
                 .onAppear {
                     viewModel.onAppBecameActive()

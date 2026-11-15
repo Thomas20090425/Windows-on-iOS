@@ -132,14 +132,12 @@ def txm_jit_cmd(debugger, command, exe_ctx, result, internal_dict):
         raw = process.ReadMemory(pc, 4, err) if pc != 0 else b""
         if not err.Success() or len(raw) != 4:
             desc = thread.GetStopDescription(128)
-            print(f"[txm-jit] Stop #{step}: tid={thread.GetIndexID()} pc={pc:#x} ({desc}); continuing", flush=True)
-            continue
+            raise RuntimeError(f"Cannot inspect stopped instruction at {pc:#x} ({desc}); refusing to continue")
 
         insn = struct.unpack("<I", raw)[0]
         if (insn & 0xFFE0001F) != 0xD4200000:
             desc = thread.GetStopDescription(128)
-            print(f"[txm-jit] Stop #{step}: non-BRK stop tid={thread.GetIndexID()} pc={pc:#x} insn={insn:#010x} ({desc}); continuing", flush=True)
-            continue
+            raise RuntimeError(f"Unexpected stop at {pc:#x}, instruction {insn:#010x} ({desc}); refusing to continue")
 
         imm = (insn >> 5) & 0xFFFF
         print(f"[txm-jit] Stop #{step}: BRK #{imm:#x} tid={thread.GetIndexID()} at pc={pc:#x} (x0={x0:#x}, x1={x1:#x}, x16={x16:#x})", flush=True)
@@ -170,9 +168,9 @@ def txm_jit_cmd(debugger, command, exe_ctx, result, internal_dict):
                 detached = True
                 break
             else:
-                write_reg(debugger, process, thread, "pc", pc + 4)
+                raise RuntimeError(f"Unknown JIT command {x16:#x}; leaving the process stopped")
         else:
-            write_reg(debugger, process, thread, "pc", pc + 4)
+            raise RuntimeError(f"Unexpected BRK #{imm:#x}; leaving the process stopped")
 
     if not detached:
         raise RuntimeError("Exited loop without seeing CMD_DETACH")

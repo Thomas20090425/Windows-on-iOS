@@ -22,6 +22,9 @@ typedef void (^WinIOSStateCallback)(void);
 @property (nonatomic, readonly) uint32_t framebufferHeight;
 @property (nonatomic, readonly) uint64_t presentedFrames;
 @property (nonatomic, readonly) uint64_t availableMemoryMB;
+@property (nonatomic, readonly) uint64_t maxGuestMemoryMB;
+@property (nonatomic, readonly) NSString *runtimeCapabilityText;
+@property (nonatomic, readonly) NSString *networkStatusText;
 @property (nonatomic, readonly) BOOL usbKeyboardReady;
 @property (nonatomic, readonly) BOOL usbTabletReady;
 @property (nonatomic, readonly) uint64_t usbEventsDelivered;
@@ -35,6 +38,8 @@ typedef void (^WinIOSStateCallback)(void);
 - (BOOL)tryAcquireJIT:(BOOL)detachAfter;
 
 - (BOOL)hasProvisionedMachine;
+- (BOOL)configureMachineDirectory:(NSString *)directory memoryMB:(uint64_t)memoryMB cpuCount:(NSInteger)cpuCount networkEnabled:(BOOL)networkEnabled audioEnabled:(BOOL)audioEnabled;
+- (BOOL)configureRuntimeOptions:(NSDictionary<NSString *, NSNumber *> *)options;
 - (BOOL)needsSparseUnpack;
 - (void)prepareAndStartWithLayer:(nullable CAMetalLayer *)layer;
 - (void)bindMetalLayer:(nullable CAMetalLayer *)layer;
@@ -43,6 +48,7 @@ typedef void (^WinIOSStateCallback)(void);
 - (void)updateHingeStatus:(NSInteger)status angleDegrees:(double)angleDegrees;
 
 - (void)sendTabletNormalizedX:(double)x y:(double)y buttons:(uint8_t)buttons wheel:(int8_t)wheel;
+- (void)sendTabletNormalizedX:(double)x y:(double)y buttons:(uint8_t)buttons wheel:(int8_t)wheel horizontalWheel:(int8_t)horizontalWheel;
 - (void)sendKeyHid:(uint8_t)usage down:(BOOL)down;
 - (void)tapKeyHid:(uint8_t)usage;
 - (void)sendKeyComboWithModifiers:(NSArray<NSNumber *> *)modifiers key:(uint8_t)usage;

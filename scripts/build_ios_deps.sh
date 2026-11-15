@@ -13,14 +13,15 @@ SRC="$WORK_DEPS/src"
 PREFIX="$WORK_DEPS/sysroot"
 STAMPS="$WORK_DEPS/stamps"
 OUT_DEPS="$ROOT/ios/deps"
-HUSK_REF="${HUSK_REF:-/Users/ammaar/.gemini/antigravity/brain/f6b287cc-b4bb-4bf9-b1ba-7daee58236c9/scratch/refs/Husk}"
+HUSK_REF="${HUSK_REF:-$ROOT/work/refs/Husk}"
 
 mkdir -p "$DL" "$SRC" "$PREFIX" "$STAMPS" "$OUT_DEPS/lib" "$OUT_DEPS/include"
 
 ARCH=arm64
 SDK=iphoneos
 SDKMINVER=17.0
-NCPU="$(sysctl -n hw.ncpu)"
+NCPU="${JOBS:-2}"
+PYTHON="$(command -v python3)"
 SDKROOT="$(xcrun --sdk $SDK --show-sdk-path)"
 CFLAGS_TARGET="-target $ARCH-apple-ios$SDKMINVER"
 
@@ -93,7 +94,7 @@ ranlib = ['$RANLIB']
 strip = ['$STRIP', '-x']
 pkg-config = ['$PKG_CONFIG']
 pkgconfig = ['$PKG_CONFIG']
-python = ['/opt/homebrew/bin/python3']
+python = ['$PYTHON']
 [host_machine]
 system = '$system'
 EOF

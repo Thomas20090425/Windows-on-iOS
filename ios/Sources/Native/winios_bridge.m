@@ -5,12 +5,16 @@
 #include "share.h"
 #include "winios_jit.h"
 #include "winvm.h"
+#include <TargetConditionals.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
 #include <mach/mach_time.h>
 #include <os/lock.h>
 #include <sys/stat.h>
+#include <sys/utsname.h>
 
 static WinIOSBridge *s_shared_bridge = nil;
 
@@ -24,6 +28,19 @@ static WinIOSBridge *s_shared_bridge = nil;
     CFAbsoluteTime _bootStartTime;
     uint64_t _configuredRamMB;
     int _configuredCPUs;
+    NSString *_selectedMachineDirectory;
+    uint64_t _requestedRamMB;
+    int _requestedCPUs;
+    BOOL _networkEnabled;
+    BOOL _audioEnabled;
+    BOOL _hasCreatedVM;
+    BOOL _primaryDiskReadOnly;
+    BOOL _sharedFolderEnabled;
+    BOOL _microphoneEnabled;
+    BOOL _diagnosticLogging;
+    int _displayRefreshRate;
+    int _tcpForwardHostPort;
+    int _tcpForwardGuestPort;
     CAMetalLayer *__weak _pendingLayer;
     uint64_t _diagTickCount;
     uint64_t _lastMachTicks;
@@ -79,6 +96,13 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 - (instancetype)init {
     if ((self = [super init])) {
         _vmStatus = @"Idle";
+        _requestedRamMB = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad ? 4096 : 4608;
+        _requestedCPUs = 4;
+        _networkEnabled = YES;
+        _audioEnabled = YES;
+        _sharedFolderEnabled = YES;
+        _microphoneEnabled = UIDevice.currentDevice.userInterfaceIdiom != UIUserInterfaceIdiomPad;
+        _displayRefreshRate = 60;
         _metricsLock = OS_UNFAIR_LOCK_INIT;
         _screenSizePts = CGSizeZero;
         _screenScale = 3.0;
@@ -99,6 +123,11 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
 - (void)configureAudioSessionAndMicPermission {
     AVAudioSession *session = [AVAudioSession sharedInstance];
+    if (!_microphoneEnabled) {
+        [session setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
+        [session setActive:YES error:nil];
+        return;
+    }
     AVAudioSessionCategoryOptions opts = AVAudioSessionCategoryOptionDefaultToSpeaker |
                                          AVAudioSessionCategoryOptionAllowBluetooth |
                                          AVAudioSessionCategoryOptionAllowBluetoothA2DP |
@@ -167,14 +196,13 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
 - (void)installTrapGuard {
     winios_jit_install_trap_handler();
-    [[UIApplication sharedApplication] setIdleTimerDisabled:YES];
-    [self configureAudioSessionAndMicPermission];
     UIScreen *mainScreen = [UIScreen mainScreen];
     [self updateScreenSize:mainScreen.bounds.size scale:mainScreen.scale];
     [self notifyChanged];
 }
 
 - (BOOL)tryAcquireJIT:(BOOL)detachAfter {
+    winios_jit_set_guest_memory_mb(_requestedRamMB);
     BOOL ok = winios_jit_acquire(WINIOS_JIT_DEFAULT_BYTES, detachAfter);
     dispatch_async(_diagQueue, ^{
         [self writeDiagnosticsSnapshot];
@@ -231,6 +259,86 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     return (uint64_t)(winios_available_memory_bytes() >> 20);
 }
 
+- (uint64_t)maxGuestMemoryMB {
+    /* Conservative admission policy, not a guarantee against Jetsam. Leave
+     * physical headroom for iPadOS, dual JIT mappings, translation tables and UI. */
+    uint64_t physicalMB = NSProcessInfo.processInfo.physicalMemory >> 20;
+    uint64_t maximum = physicalMB > 3072 ? ((physicalMB - 3072) & ~255ull) : 0;
+    return MIN(maximum, 4608ull);
+}
+
+- (NSString *)runtimeCapabilityText {
+#if TARGET_OS_SIMULATOR
+    return @"The ARM64 JIT engine requires a physical device.";
+#else
+    struct utsname info;
+    uname(&info);
+    BOOL duo = strcmp(info.machine, "iPhone19,4") == 0;
+    BOOL ipad = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad;
+    if (!duo && !ipad) return @"This build targets iPad and iPhone Duo only.";
+    if (self.maxGuestMemoryMB < 4096) return @"Windows 11 requires 4 GiB guest RAM; this device lacks the configured host headroom.";
+    return ipad ? @"Experimental iPad candidate. Debugger-assisted JIT and Windows boot require device verification."
+                : @"iPhone Duo runtime. Debugger-assisted JIT is required.";
+#endif
+}
+
+- (NSString *)networkStatusText {
+    if (!_networkEnabled) return @"Disabled";
+    if (!_vmRunning) return @"Not started";
+    return hv_winvm_network_up() ? @"NAT backend ready (guest NetKVM driver required)" : @"NAT backend unavailable; check configured host port and diagnostics";
+}
+
+- (BOOL)configureRuntimeOptions:(NSDictionary<NSString *, NSNumber *> *)options {
+    if (_vmRunning || _unpacking || _hasCreatedVM) return NO;
+    for (id value in options.allValues) if (![value isKindOfClass:NSNumber.class]) return NO;
+    NSInteger hz = options[@"displayRefreshRate"] ? options[@"displayRefreshRate"].integerValue : 60;
+    NSInteger hp = options[@"tcpForwardHostPort"].integerValue;
+    NSInteger gp = options[@"tcpForwardGuestPort"].integerValue;
+    if ((hz != 30 && hz != 60 && hz != 120) ||
+        ((hp || gp) && (hp < 1024 || hp > 65535 || gp < 1 || gp > 65535))) {
+        _vmStatus = @"Choose 30/60/120 Hz and a TCP host port from 1024–65535 with a guest port from 1–65535, or set both ports to zero.";
+        [self notifyChanged];
+        return NO;
+    }
+    _primaryDiskReadOnly = options[@"primaryDiskReadOnly"].boolValue;
+    _sharedFolderEnabled = options[@"sharedFolderEnabled"] ? options[@"sharedFolderEnabled"].boolValue : YES;
+    _microphoneEnabled = options[@"microphoneEnabled"].boolValue;
+    _diagnosticLogging = options[@"diagnosticLogging"].boolValue;
+    _displayRefreshRate = (int)hz;
+    _tcpForwardHostPort = (int)hp;
+    _tcpForwardGuestPort = (int)gp;
+    return YES;
+}
+
+- (BOOL)configureMachineDirectory:(NSString *)directory memoryMB:(uint64_t)memoryMB cpuCount:(NSInteger)cpuCount networkEnabled:(BOOL)networkEnabled audioEnabled:(BOOL)audioEnabled {
+    if (_vmRunning || _unpacking || _hasCreatedVM) {
+        _vmStatus = @"Close and relaunch the app before changing machines after a VM session.";
+        [self notifyChanged];
+        return NO;
+    }
+    NSString *resolved = directory.stringByStandardizingPath.stringByResolvingSymlinksInPath;
+    NSString *machines = [[[self documentsPath] stringByAppendingPathComponent:@"Machines"] stringByResolvingSymlinksInPath];
+    if (![resolved hasPrefix:[machines stringByAppendingString:@"/"]]) {
+        _vmStatus = @"Machine files must be imported into Documents/Machines.";
+        [self notifyChanged];
+        return NO;
+    }
+    if (memoryMB < 4096 || memoryMB > self.maxGuestMemoryMB || (memoryMB % 256) != 0 || cpuCount < 1 || cpuCount > 4) {
+        _vmStatus = @"Invalid configuration: choose 1–4 CPUs and 4–4.5 GiB RAM within this device's limit.";
+        [self notifyChanged];
+        return NO;
+    }
+    _selectedMachineDirectory = resolved;
+    _requestedRamMB = memoryMB;
+    _requestedCPUs = (int)cpuCount;
+    _networkEnabled = networkEnabled;
+    _audioEnabled = audioEnabled;
+    winios_jit_set_guest_memory_mb(memoryMB);
+    _vmStatus = @"Ready to start Windows 11 24H2 ARM64";
+    [self notifyChanged];
+    return YES;
+}
+
 - (BOOL)usbKeyboardReady {
     if (!_vmRunning) return NO;
     int kr = 0;
@@ -257,6 +365,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 }
 
 - (NSString *)machineDirectory {
+    if (_selectedMachineDirectory) return _selectedMachineDirectory;
     NSString *docs = [self documentsPath];
     NSString *win11Dir = [docs stringByAppendingPathComponent:@"Machines/Win11"];
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -278,6 +387,8 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
 - (BOOL)needsSparseUnpack {
     NSString *dir = [self machineDirectory];
+    /* An existing writable image always wins; never replace a user's disk. */
+    if ([[NSFileManager defaultManager] fileExistsAtPath:[dir stringByAppendingPathComponent:@"windows11.img"]]) return NO;
     NSString *sparse = [dir stringByAppendingPathComponent:@"windows11.hvsparse"];
     return [[NSFileManager defaultManager] fileExistsAtPath:sparse];
 }
@@ -309,6 +420,24 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 - (void)prepareAndStartWithLayer:(nullable CAMetalLayer *)layer {
     if (layer) _pendingLayer = layer;
     if (_vmRunning || _unpacking) return;
+    if (_hasCreatedVM) {
+        _vmStatus = @"Relaunch the app before starting another session; complete runtime teardown is not implemented.";
+        [self notifyChanged];
+        return;
+    }
+#if TARGET_OS_SIMULATOR
+    _vmStatus = self.runtimeCapabilityText;
+    [self notifyChanged];
+    return;
+#else
+    struct utsname deviceInfo;
+    uname(&deviceInfo);
+    if ((UIDevice.currentDevice.userInterfaceIdiom != UIUserInterfaceIdiomPad && strcmp(deviceInfo.machine, "iPhone19,4") != 0) || self.maxGuestMemoryMB < 4096) {
+        _vmStatus = self.runtimeCapabilityText;
+        [self notifyChanged];
+        return;
+    }
+#endif
 
     if (!self.isJITLive) {
         [self tryAcquireJIT:YES];
@@ -337,24 +466,27 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
         NSString *src = [dir stringByAppendingPathComponent:@"windows11.hvsparse"];
         NSString *dst = [dir stringByAppendingPathComponent:@"windows11.img"];
-        NSString *tmpDst = [dir stringByAppendingPathComponent:@"windows11.img.unpacking"];
+        NSString *tmpDst = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.unpacking", NSUUID.UUID.UUIDString]];
 
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            unlink(tmpDst.fileSystemRepresentation);
-            unlink(dst.fileSystemRepresentation);
             UnpackCtx ctx = {.bridge = self, .lastUpdate = 0};
             int rc = hv_sparse_unpack(src.fileSystemRepresentation, tmpDst.fileSystemRepresentation, unpack_progress_cb, &ctx);
+            /* link() atomically publishes only when destination does not exist.
+             * Keep the source sparse image for recovery and future re-import. */
+            if (rc == 0) {
+                int fd = open(tmpDst.fileSystemRepresentation, O_RDWR);
+                if (fd < 0) rc = -1;
+                else { if (fsync(fd) != 0) rc = -1; close(fd); }
+                if (rc == 0 && link(tmpDst.fileSystemRepresentation, dst.fileSystemRepresentation) != 0) rc = -1;
+            }
+            unlink(tmpDst.fileSystemRepresentation);
             dispatch_async(dispatch_get_main_queue(), ^{
                 self->_unpacking = NO;
                 if (rc == 0) {
-                    unlink(dst.fileSystemRepresentation);
-                    rename(tmpDst.fileSystemRepresentation, dst.fileSystemRepresentation);
-                    unlink(src.fileSystemRepresentation);
                     self->_unpackProgress = 1.0;
                     [self startConfiguredVMInDirectory:dir];
                 } else {
-                    unlink(tmpDst.fileSystemRepresentation);
-                    self->_vmStatus = @"Error: failed to unpack windows11.hvsparse";
+                    self->_vmStatus = @"Image extraction failed (check free storage). Existing disks and the source were preserved.";
                     dispatch_async(self->_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
                     [self notifyChanged];
                 }
@@ -368,7 +500,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
 - (void)startConfiguredVMInDirectory:(NSString *)dir {
     if (_vmRunning) return;
-    [self configureAudioSessionAndMicPermission];
+    if (_audioEnabled) [self configureAudioSessionAndMicPermission];
 
     WinIosDualMapping jit = winios_jit_mapping();
     if (!jit.rx_addr || !jit.rw_addr) {
@@ -382,15 +514,12 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
     uint64_t preallocBytes = 0;
     void *preallocRam = winios_jit_guest_ram(&preallocBytes);
-    uint64_t ramMB = 3072;
-    if (preallocRam && preallocBytes >= (1024ull << 20)) {
-        ramMB = preallocBytes >> 20;
-    } else {
-        uint64_t availMB = [self availableMemoryMB];
-        if (availMB >= 5000) ramMB = 4096;
-        else if (availMB >= 4200) ramMB = 3584;
-        else if (availMB < 3400 && availMB > 1800) ramMB = (availMB - 768) & ~127ull;
-        else if (availMB <= 1800) ramMB = 2048;
+    uint64_t ramMB = MIN(_requestedRamMB, self.maxGuestMemoryMB);
+    if (ramMB < 4096 || (preallocRam && preallocBytes < (ramMB << 20)) ||
+        (!preallocRam && [self availableMemoryMB] < ramMB + 1024)) {
+        _vmStatus = @"Insufficient guest RAM reservation. Relaunch with the selected memory setting and attach the JIT helper; no unsafe low-memory fallback was used.";
+        [self notifyChanged];
+        return;
     }
 
     NSString *sharedDir = [[self documentsPath] stringByAppendingPathComponent:@"Shared"];
@@ -403,30 +532,40 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     NSString *codePath = [dir stringByAppendingPathComponent:@"code.fd"];
     NSString *varsPath = [dir stringByAppendingPathComponent:@"vars.fd"];
     NSString *diskPath = [dir stringByAppendingPathComponent:@"windows11.img"];
+    NSString *secondaryDisk = [dir stringByAppendingPathComponent:@"secondary.img"];
+    BOOL hasSecondaryDisk = [[NSFileManager defaultManager] fileExistsAtPath:secondaryDisk];
 
     _configuredRamMB = ramMB;
-    _configuredCPUs = 4;
+    _configuredCPUs = _requestedCPUs;
 
     HvWinVmConfig cfg = {
         .code_fd = codePath.fileSystemRepresentation,
         .vars_fd = varsPath.fileSystemRepresentation,
         .disk0 = diskPath.fileSystemRepresentation,
-        .disk1 = NULL,
-        .share_dir = sharedDir.fileSystemRepresentation,
-        .share_sock = shareSock.fileSystemRepresentation,
+        .disk1 = hasSecondaryDisk ? secondaryDisk.fileSystemRepresentation : NULL,
+        .share_dir = _sharedFolderEnabled && _networkEnabled ? sharedDir.fileSystemRepresentation : NULL,
+        .share_sock = _sharedFolderEnabled && _networkEnabled ? shareSock.fileSystemRepresentation : NULL,
         .ncpus = _configuredCPUs,
         .ram_mb = _configuredRamMB,
         .jit_bytes = jit.size,
         .jit_rx = jit.rx_addr,
         .jit_rw = jit.rw_addr,
         .prealloc_ram = preallocRam,
-        .no_net = 0,
-        .enable_sound = 1,
-        .log = 0,
+        .no_net = _networkEnabled ? 0 : 1,
+        .enable_sound = _audioEnabled ? 1 : 0,
+        .log = _diagnosticLogging ? 1 : 0,
         .stats_interval = 0,
+        .disk0_readonly = _primaryDiskReadOnly,
+        .disable_microphone = !_microphoneEnabled,
+        .display_refresh_hz = _displayRefreshRate,
+        .tcp_forward_host_port = _tcpForwardHostPort,
+        .tcp_forward_guest_port = _tcpForwardGuestPort,
     };
 
     char err[256] = {0};
+    /* The current engine owns process-global state and has no complete destroy
+     * path. Do not recreate it over live threads, mappings or disk handles. */
+    _hasCreatedVM = YES;
     if (hv_winvm_create(&cfg, err, sizeof err) != 0) {
         _vmStatus = [NSString stringWithFormat:@"VM create failed: %s", err];
         dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
@@ -486,8 +625,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         if ((_diagTickCount % 4u) == 0u) {
             hv_winvm_flush_disks();
         }
-        double uptime = CFAbsoluteTimeGetCurrent() - _bootStartTime;
-        if (uptime <= 240.0 || getenv("WINIOS_ALWAYS_SCREENSHOT") != NULL) {
+        if (getenv("WINIOS_ALWAYS_SCREENSHOT") != NULL) {
             NSString *docs = [self documentsPath];
             NSString *tmpPng = [docs stringByAppendingPathComponent:@"latest_screen.png.tmp"];
             NSString *dstPng = [docs stringByAppendingPathComponent:@"latest_screen.png"];
@@ -594,6 +732,11 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 - (void)sendTabletNormalizedX:(double)x y:(double)y buttons:(uint8_t)buttons wheel:(int8_t)wheel {
     if (!_vmRunning) return;
     hv_winvm_tablet(x, y, buttons, wheel);
+}
+
+- (void)sendTabletNormalizedX:(double)x y:(double)y buttons:(uint8_t)buttons wheel:(int8_t)wheel horizontalWheel:(int8_t)horizontalWheel {
+    if (!_vmRunning) return;
+    hv_winvm_tablet_scroll(x, y, buttons, wheel, horizontalWheel);
 }
 
 - (void)sendKeyHid:(uint8_t)usage down:(BOOL)down {
