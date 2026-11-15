@@ -48,35 +48,9 @@ def find_stopped_thread(process):
 
 
 def bless_txm_region(debugger, process, rx_addr: int, size: int):
-    t0 = time.time()
-    err = lldb.SBError()
-    # First try fast 1 MiB MachVMWrite chunks via SBProcess.WriteMemory (touches every 16 KiB page)
-    chunk_size = 1 << 20
-    payload = b"\x69" * chunk_size
-    wrote = process.WriteMemory(rx_addr, payload[: min(chunk_size, size)], err)
-    if err.Success() and wrote == min(chunk_size, size):
-        off = wrote
-        while off < size:
-            cur = min(chunk_size, size - off)
-            w = process.WriteMemory(rx_addr + off, payload[:cur], err)
-            if not err.Success() or w != cur:
-                raise RuntimeError(f"WriteMemory failed at +{off:#x}: {err.GetCString()}")
-            off += w
-        dt = time.time() - t0
-        print(f"[txm-jit] Blessed {size >> 20} MiB RX region at {rx_addr:#x} via bulk WriteMemory in {dt:.2f}s", flush=True)
-        return
-
-    print(f"[txm-jit] Bulk WriteMemory returned ({wrote}, {err.GetCString()}); falling back to per-16K-page M packets...", flush=True)
-    pages = size // 0x4000
-    for idx in range(pages):
-        addr = rx_addr + idx * 0x4000
-        w = process.WriteMemory(addr, b"\x69", err)
-        if not err.Success() or w != 1:
-            out = run_cmd(debugger, f"process plugin packet send M{addr:x},1:69")
-            if "OK" not in out:
-                raise RuntimeError(f"Failed to bless page {addr:#x}: {out}")
-        if (idx + 1) % 4096 == 0 or idx + 1 == pages:
-            print(f"[txm-jit] Blessed {idx + 1}/{pages} pages ({time.time() - t0:.1f}s)", flush=True)
+    # Keep older callers on the common sparse preparation path as well.
+    from _lldb_txm_jit import bless_txm_region as prepare
+    return prepare(debugger, process, rx_addr, size)
 
 
 def main():

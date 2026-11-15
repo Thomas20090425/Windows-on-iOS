@@ -32,6 +32,7 @@ they do not validate the subsequently added app/device changes.
 | New input/UI/config/lifecycle/storage tests | **NOT RUN — USER REQUEST** | Source and build checks only; no runtime assertions claimed. |
 | JIT helper correction and VM deletion | **COMPILED; NOT RUNTIME-TESTED** | Release/Debug compile; exported readiness word and exact assembly trap labels are present in the packaged Mach-O. Python/JavaScript helper syntax checks passed. No helper attachment or user VM deletion executed. |
 | Local symbols for device launcher | **METADATA PREPARED; NOT DEVICE-TESTED** | `build/jit-symbols-release.json` and `build/jit-symbols-debug.json` record Mach-O UUIDs/addresses from the local products, including the Debug dylib. Python/shell syntax compilation passed. No LLDB process was launched during this correction. |
+| JIT preparation transport | **USER-OBSERVED BASELINE; NEW PATH UNTIMED** | User log reports 21 MiB of full-region preparation after 72.9 s, about 0.288 MiB/s or a linear projection of 22.2 minutes for 384 MiB. Default changed to acknowledged one-byte-per-16-KiB-page raw debugger packets. No elapsed-time result exists yet for the new path. |
 | Simulator UI checks | **NOT RUN — USER REQUEST** | Simulator compilation/execution is not native JIT verification. |
 | Physical installation | **USER-REPORTED LAUNCH; NOT AGENT-TESTED** | User supplied devicectl output showing bundle `me.ammaar.windowsios` launched on device with PID 2377. Its precise build UUID was not logged. No installation or device launch executed by the agent. |
 | Device JIT initialization | **PARTIAL USER-REPORTED EVIDENCE** | Latest supplied log shows helper readiness write/read-back, successful probe reply and allocation of 384 MiB RX memory at `0x1045e8000`. It does not show completed page preparation, RX execution self-check or helper detach. No debugger attachment performed by the agent. |
@@ -113,6 +114,25 @@ LLDB session. A single blocked debugger call can still delay output; no bounded
 device completion time is promised. Source reference: [LLDB symbol lookup settings](https://raw.githubusercontent.com/llvm/llvm-project/main/lldb/source/Core/CoreProperties.td).
 Python/shell syntax compilation and read-only dSYM metadata preparation passed;
 this specific change was not executed against a device.
+
+The next user log established ongoing transfer rather than a proven hang:
+21 MiB completed in 72.9 seconds. That measured bulk rate is unacceptable for
+startup. Upstream [StikDebug page preparation](https://github.com/StikDebug/StikDebug/blob/f9c1f46fad389e6f46466777808eca99e9426c81/StikDebug/JSSupport/JSDebugSupport.swift#L89-L150)
+writes one byte into each 16 KiB page. The helper now defaults to the same page
+coverage through raw `M<address>,1:69` debugger commands, requiring an exact `OK`
+for every page. The 384 MiB region remains unchanged and all 24,576 pages are
+visited. Application RX alias/execution checks are unchanged. The payload
+falls from 402,653,184 bytes to 24,576 bytes; this ratio is a deterministic byte
+count, not a measured speedup. LLDB's serial command interface still incurs
+24,576 round trips and does not reproduce StikDebug's 128-packet pipelining.
+
+An explicit `WINIOS_JIT_PREPARE=bulk` diagnostic mode retains full-region writes
+with `process plugin packet xfer-size 131072`, a documented command in
+[LLVM's gdb-remote implementation](https://raw.githubusercontent.com/llvm/llvm-project/main/lldb/source/Plugins/Process/gdb-remote/ProcessGDBRemote.cpp).
+The log does not identify the previously negotiated packet size, so it cannot
+prove that a particular packet budget, network type or Mac CPU caused the
+baseline. Python syntax compilation and source/protocol review passed; no
+debugger or device/VM run was executed by the agent to measure the new path.
 
 VM deletion now has sidebar swipe/context and detail actions, named confirmation,
 strict library-directory/symlink validation, background removal and a native

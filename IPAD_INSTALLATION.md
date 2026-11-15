@@ -138,13 +138,24 @@ rejects Xcode-managed profiles when forced into manual signing mode.
    helpers write and read back an explicit readiness word before resuming the
    app. Keep the helper script and installed app from the same build.
 
-   During the 384 MiB JIT memory preparation, Terminal reports transferred MiB,
-   percentage and elapsed time. The app stays paused during this stage. The
+   During JIT preparation, Terminal reports acknowledged pages, covered MiB,
+   percentage, elapsed time and an ETA based on observed packet latency. The
+   default prepares every 16 KiB page using a one-byte debugger write, following
+   the upstream protocol. A 384 MiB region has 24,576 pages, so the data payload
+   is 24,576 bytes; the helper does not upload the entire region by default.
+   Every page must return exactly `OK`. The app's RX execution check is retained.
+   Serial debugger round trips still cost time; no fixed completion time is
+   guaranteed. The app stays paused during this stage. The
    helper disables external/background symbol lookup for its own LLDB session
    and uses a nearby UUID-matched local dSYM when available. No persistent
    debugger preferences are changed. A single blocked debugger operation can
    still delay progress output; unchanged counters for several minutes should
    not be treated as proof that Windows is booting.
+
+   For transport diagnostics only, `WINIOS_JIT_PREPARE=bulk` selects the older
+   full-region method with LLDB's explicit packet transfer size set to 131072.
+   This is opt-in: the user-observed former bulk rate projected about 22 minutes
+   for 384 MiB. Packet-size tuning has not been timed on this device.
 8. The firmware boots the ISO through the virtual USB mass-storage optical
    drive. Windows Setup uses the generated answer disk to partition the new
    Windows disk and install **image index 1**, the first Windows edition on the

@@ -77,6 +77,48 @@ def find_brk_or_stopped_thread(process):
 
 
 def bless_txm_region(debugger, process, rx_addr: int, size: int):
+    page_size = 0x4000
+    if (rx_addr <= 0 or rx_addr % page_size or size <= 0 or size % page_size or
+            size > (384 << 20) or rx_addr + size > 0x7000000000):
+        raise RuntimeError("Invalid JIT region; refusing debugger memory preparation")
+    if process.GetState() != lldb.eStateStopped:
+        raise RuntimeError("JIT memory preparation requires a stopped target process")
+    mode = os.environ.get("WINIOS_JIT_PREPARE", "pages")
+    if mode == "bulk":
+        # Explicit diagnostic escape hatch. The measured old bulk path was
+        # ~22 minutes at 21 MiB/72.9s; do not silently choose it again.
+        run_cmd(debugger, "process plugin packet xfer-size 131072")
+        return bless_txm_bulk(debugger, process, rx_addr, size)
+    if mode != "pages":
+        raise RuntimeError("WINIOS_JIT_PREPARE must be pages (default) or bulk")
+    pages = size // page_size
+    started = last_report = time.monotonic()
+    print(f"[txm-jit] Preparing {pages:,} JIT pages covering {size >> 20} MiB "
+          f"with {pages:,} bytes of payload (one byte per 16 KiB page).", flush=True)
+    print("[txm-jit] Using serial debugger packets; completion depends on observed round-trip latency.", flush=True)
+    for index in range(pages):
+        address = rx_addr + index * page_size
+        output = run_cmd(debugger, f"process plugin packet send M{address:x},1:69")
+        replies = re.findall(r"^[ \t]*response:[ \t]*([^\r\n]*)", output, re.MULTILINE)
+        if len(replies) != 1 or replies[0].strip() != "OK":
+            raise RuntimeError(f"JIT page {index + 1}/{pages} at {address:#x} was not acknowledged: "
+                               f"{output.strip()}. The app remains stopped; no pages are skipped.")
+        done = index + 1
+        now = time.monotonic()
+        if done == 1 or done == pages or done % 256 == 0 or now - last_report >= 2:
+            elapsed = now - started
+            eta = ""
+            if done >= 128 and elapsed > 0:
+                remaining = elapsed * (pages - done) / done
+                eta = f", observed ETA {remaining:.0f}s" if remaining < 120 else f", observed ETA {remaining / 60:.1f}min"
+            print(f"[txm-jit] Prepared JIT pages: {done:,}/{pages:,} ({100 * done / pages:.0f}%, "
+                  f"{done * page_size / (1 << 20):.0f}/{size >> 20} MiB covered, {elapsed:.1f}s{eta})", flush=True)
+            last_report = now
+    print(f"[txm-jit] All {pages:,} JIT pages acknowledged in {time.monotonic() - started:.1f}s. "
+          "The app's RX execution check still runs before the VM starts.", flush=True)
+
+
+def bless_txm_bulk(debugger, process, rx_addr: int, size: int):
     t0 = time.monotonic()
     last_report = t0
     print(f"[txm-jit] Preparing JIT memory: 0/{size >> 20} MiB. The app stays paused during this transfer.", flush=True)
@@ -114,7 +156,8 @@ def bless_txm_region(debugger, process, rx_addr: int, size: int):
         w = process.WriteMemory(addr, b"\x69", err)
         if not err.Success() or w != 1:
             out = run_cmd(debugger, f"process plugin packet send M{addr:x},1:69")
-            if "OK" not in out:
+            replies = re.findall(r"^[ \t]*response:[ \t]*([^\r\n]*)", out, re.MULTILINE)
+            if len(replies) != 1 or replies[0].strip() != "OK":
                 raise RuntimeError(f"Failed to bless page {addr:#x}: {out}")
         progress((idx + 1) * 0x4000)
     print(f"[txm-jit] Prepared {pages} JIT pages in {time.monotonic() - t0:.1f}s", flush=True)

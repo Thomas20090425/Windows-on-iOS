@@ -12,6 +12,8 @@ Their subsequent Mac launcher log reached device attachment but failed to find
 the readiness symbol; remote symbol availability had been mistaken for app age.
 The next log passed readiness/probe/RX allocation and stopped reporting progress
 while LLDB displayed external-symbol lookup during memory preparation.
+Subsequent user progress (21 MiB in 72.9 s) showed that full-region preparation
+was advancing slowly, projecting 22.2 minutes at that measured rate.
 
 ## Completed source work
 
@@ -51,6 +53,11 @@ while LLDB displayed external-symbol lookup during memory preparation.
 - Limited this helper's LLDB symbol discovery to local metadata, including
   explicit UUID-matched dSYM files when present. Added memory preparation
   progress in both transfer paths. No persistent debugger setting was changed.
+- Changed default JIT preparation to one acknowledged raw debugger byte per
+  16 KiB page, using the upstream page coverage protocol. All 24,576 pages in
+  the 384 MiB region are still visited; the payload is 24 KiB rather than
+  384 MiB. Preserved RX checks and added an observed ETA. A packet-size-tuned
+  bulk mode remains explicit diagnostics only; no measured new speedup claimed.
 
 ## Build evidence and constraints
 
@@ -77,6 +84,9 @@ while LLDB displayed external-symbol lookup during memory preparation.
   384 MiB RX allocation. Completed JIT preparation/execution remains unverified.
   The follow-up symbol-search/progress adjustment passed syntax compilation and
   local dSYM metadata preparation only; no LLDB/device/VM was run by the agent.
+- The sparse transport change passed Python syntax compilation and static
+  protocol review. The baseline timing came from the user's device log; the
+  new preparation path still needs a device timing/functional result.
 
 ## Remaining external/runtime work
 
