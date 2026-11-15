@@ -22,6 +22,7 @@
 #include "virtio_net.h"
 #include "virtio_snd.h"
 #include "xhci.h"
+#include "tpm_crb.h"
 
 /* Standard ARM64 'virt' physical memory map for EDK2 UEFI + Windows 11 ARM64 */
 #define WINVIRT_FLASH0_PA     0x00000000ULL
@@ -79,6 +80,7 @@ typedef struct HvWinVirt {
     HvXhci *usb;
     HvHda *hda;
     HvVirtioSnd *snd;
+    HvTpmCrb *tpm;
 
     uint32_t ged_events;
     void (*poll)(void);
@@ -87,7 +89,8 @@ typedef struct HvWinVirt {
 uint8_t *hv_alloc_no_footprint(uint64_t size);
 int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_t ram_size,
                       void *prealloc_ram, const char *code_fd_path, const char *vars_fd_path,
-                      HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound);
+                      HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound,
+                      const char *tpm_state_dir, char *error, size_t error_size);
 void hv_winvirt_reset_cpu(HvWinVirt *b);
 void hv_winvirt_power_button(HvWinVirt *b);
 

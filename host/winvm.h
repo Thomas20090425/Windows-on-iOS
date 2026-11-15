@@ -16,6 +16,7 @@ typedef struct HvWinVmConfig {
     const char *installer_answer_disk; /* Optional read-only 512-byte removable setup disk. */
     const char *share_dir;    /* Optional host folder shared over WebDAV at http://10.0.2.4/ */
     const char *share_sock;   /* Path for internal WebDAV Unix domain socket */
+    const char *tpm_state_dir; /* Optional persistent software TPM2 identity/state directory. */
     int ncpus;
     uint64_t ram_mb;
     size_t jit_bytes;
@@ -64,5 +65,6 @@ int hv_winvm_network_up(void);
 HvMachine *hv_winvm_machine(void);
 HvWinVirt *hv_winvm_board(void);
 const char *hv_winvm_reason_name(int reason);
+const char *hv_winvm_last_error(void);
 
 #endif

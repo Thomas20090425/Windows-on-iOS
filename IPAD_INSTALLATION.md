@@ -8,7 +8,8 @@ been verified to boot Windows in this session. See [VALIDATION_REPORT.md](VALIDA
 ## Hardware and operating system
 
 - Physical ARM64 iPad, conservatively requiring at least 8 GB physical RAM.
-  The application admits 4–4.5 GiB guest RAM only after reserving 3 GiB of
+  Enter a custom whole number of MiB for guest RAM, starting at 4096 MiB.
+  The application admits the requested amount only after reserving 3 GiB of
   physical headroom; this policy does not guarantee immunity from Jetsam.
 - Deployment target: iPadOS 17.0 or later. This is an SDK/build requirement,
   **not** a tested runtime compatibility list. JIT/TXM behavior is device and
@@ -29,7 +30,8 @@ been verified to boot Windows in this session. See [VALIDATION_REPORT.md](VALIDA
 ## Build and signing
 
 Use an Apple Silicon Mac with full Xcode, its iOS SDK, XcodeGen, Homebrew build
-tools (`meson`, `ninja`, `pkg-config`, `libslirp`, `gettext`) and Python 3.
+tools (`meson`, `ninja`, `pkg-config`, `libslirp`, `gettext`, `autoconf`,
+`automake`, `libtool`), Perl and Python 3.
 The compiled artifact was built with Xcode 26.6 / iOS SDK 26.5.
 
 From the repository root:
@@ -91,8 +93,12 @@ rejects Xcode-managed profiles when forced into manual signing mode.
 
    You do not find, download or import firmware or a variable store yourself.
    Existing VMs and disks are not overwritten.
-5. Set the desired per-machine options before starting. Choose 4 GiB initially;
-   4.25/4.5 GiB depend on both host admission and the JIT-time RAM reservation.
+5. Set the desired per-machine options before starting. Enter the guest RAM in
+   MiB and tap **Apply RAM allowance**: for example, 6144 for 6 GiB or 8192 for
+   8 GiB. Any whole MiB value from 4096 up to the displayed device limit is
+   accepted; the old 4.5 GiB ceiling and 256 MiB increments are removed. Memory
+   is reserved at JIT setup. Changing an already reserved amount requires an
+   app relaunch; the app never silently shrinks the selected allowance.
 6. Initialize JIT using a compatible helper. **Xcode Run alone is not a JIT
    helper.** A normal debug attachment now returns a setup message without
    emitting custom allocation/probe breakpoint instructions. To use a Mac,
@@ -216,8 +222,18 @@ target. Startup and warm-reset guards remove the automatic answer path after
 the primary disk is partitioned, preventing repeat automatic formatting of an
 installed VM. The primary disk remains writable throughout installation.
 
-**Installation remains runtime-unverified.** This engine does not implement a
-TPM, and Windows Setup may reject its hardware requirements or encounter other
+**Installation remains runtime-unverified.** The app now includes a persistent
+software TPM 2.0 using libtpms and OpenSSL. Windows discovers its CRB interface
+through `MSFT0101` and the ACPI TPM2 table; the bundled EDK2 firmware uses a
+FIFO interface backed by that same TPM. No additional TPM driver or import is
+required. Each VM's keys and NV state stay in its own `TPM/` folder, with an
+identity marker beside the folder. Keep these together with the Windows disk
+when backing up a VM; missing/corrupt established state stops startup rather
+than silently manufacturing a replacement identity. Deleting a VM also removes
+its TPM state. This is a software device, not the iPad Secure Enclave or
+hardware-backed attestation. See [TPM provenance](docs/TPM_PROVENANCE.md).
+
+Windows Setup may still reject other hardware requirements or encounter
 firmware/device limitations. Bundling Secure Boot-capable EDK2 firmware and a
 Microsoft-enrolled variable template does not prove that guest Secure Boot or
 Windows 11 platform compliance works on this virtual hardware. No requirement
@@ -266,6 +282,10 @@ can be deleted through the same confirmation flow.
 - Physical keyboard: HID key-down/up, modifiers, arrows, Escape, function keys
   and guest shortcuts. Command maps to the Windows key by default; optionally
   map it to Control. Some iPadOS-reserved shortcuts cannot reach the guest.
+- F1–F12 are available as an onscreen row in the iPad session. When a hardware
+  keyboard is connected, only that keyboard row is shown; the software keyboard
+  is hidden. Duo also switches to the full display with the F-key row when a
+  physical keyboard is connected.
 - Mouse/trackpad: absolute pointer, left/right/middle buttons, dragging, and
   horizontal/vertical scrolling. Windows handles double-click timing.
 - Touch: tap/drag, long press or two-finger tap for right-click, optional relative
@@ -314,7 +334,7 @@ iPadOS may suspend or terminate the app. Keep it foregrounded while working.
 | Insufficient reservation | Relaunch, select supported memory before Start, and initialize JIT again. No sub-4-GiB fallback is used. |
 | Missing bundled firmware | Rebuild/reinstall the app. Firmware preparation runs during the app build; no firmware picker is required. |
 | ISO import fails | Choose the original Windows 11 ARM64 ISO and check free iPad storage. Failed creation removes only the new staging directory. |
-| Windows Setup rejects requirements | The virtual platform has no TPM. Capture the guest error; no silent requirement or security bypass is applied. |
+| Windows Setup rejects requirements | The app includes a software TPM 2.0, but guest recognition and other platform requirements remain unverified. Capture the guest error; no silent requirement or security bypass is applied. |
 | Existing raw disk + archive | Raw disk takes precedence. Back up before managing files; extraction will not replace it. |
 | Extraction error | Check free storage and archive integrity. Source archive and existing raw disks are retained. |
 | No network | Check NAT backend diagnostics, port conflicts and the guest's ARM64 NetKVM driver. |

@@ -18,6 +18,7 @@ python3 "$ROOT/scripts/prepare_firmware.py"
 if [[ ! -f "$ROOT/ios/deps/lib/libslirp.a" ]]; then
     JOBS="$JOBS" "$ROOT/scripts/build_ios_deps.sh"
 fi
+JOBS="$JOBS" "$ROOT/scripts/build_ios_tpm_deps.sh"
 make -C "$ROOT" -j"$JOBS" ios-lib
 xcodegen generate --spec "$ROOT/ios/project.yml"
 
@@ -81,6 +82,10 @@ if firmware.exists():
     manifest['bundled_firmware_files_sha256'] = firmware_info['files_sha256']
 else:
     raise SystemExit('Built app is missing bundled UEFI firmware provenance')
+tpm = app / 'TPM' / 'provenance.json'
+if not tpm.exists():
+    raise SystemExit('Built app is missing software TPM dependency provenance')
+manifest['software_tpm_dependencies'] = json.loads(tpm.read_text())
 if profile.exists():
     payload = subprocess.check_output(['security', 'cms', '-D', '-i', str(profile)], stderr=subprocess.DEVNULL)
     provisioning = plistlib.loads(payload)

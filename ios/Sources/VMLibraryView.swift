@@ -187,7 +187,7 @@ struct VMLibraryView: View {
             Button("Delete", role: .destructive) { deleteConfirmed(machine) }
             Button("Cancel", role: .cancel) { machineToDelete = nil }
         } message: { machine in
-            Text("Delete “\(machine.configuration.name)” permanently? Its virtual disks, imported ISO copy, firmware variables and configuration will be removed. Your original ISO and other machines are kept.")
+            Text("Delete “\(machine.configuration.name)” permanently? Its virtual disks, imported ISO copy, firmware variables, TPM state and configuration will be removed. Your original ISO and other machines are kept.")
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.data], allowsMultipleSelection: false) { result in
             guard let selected else { return }
@@ -322,6 +322,8 @@ struct VMLibraryView: View {
 
 struct VMConfigurationFields: View {
     @Binding var configuration: VMConfiguration
+    @State private var memoryText = "4096"
+    @State private var memoryError: String?
     @State private var hostPort = "0"
     @State private var guestPort = "0"
     @State private var portError: String?
@@ -332,13 +334,16 @@ struct VMConfigurationFields: View {
                 Picker("Virtual CPUs", selection: $configuration.cpuCount) {
                     ForEach(1...4, id: \.self) { Text("\($0)").tag($0) }
                 }
-                Picker("Guest memory", selection: $configuration.memoryMB) {
-                    Text("4 GiB").tag(UInt64(4096))
-                    Text("4.25 GiB").tag(UInt64(4352))
-                    Text("4.5 GiB").tag(UInt64(4608))
-                }
+                TextField("Guest memory (MiB)", text: $memoryText)
+                    .keyboardType(.numberPad)
+                    .onSubmit { saveMemory() }
+                    .accessibilityLabel("Guest memory in mebibytes")
+                Button("Apply RAM allowance") { saveMemory() }
+                LabeledContent("Saved guest memory", value: "\(configuration.memoryMB) MiB")
+                if let memoryError { Text(memoryError).foregroundStyle(.red).font(.caption) }
                 LabeledContent("Current device RAM limit", value: "\(WinIOSBridge.shared.maxGuestMemoryMB) MiB")
-                Text("The runtime checks device memory and debugger allocation before launch. Requests require at least 4 GiB guest RAM plus host headroom and may be rejected. Configure memory before attaching the debugger.")
+                LabeledContent("TPM 2.0", value: "Enabled, with per-VM state")
+                Text("Enter any whole number of MiB, such as 6144 for 6 GiB. Windows 11 requires at least 4096 MiB. The device limit leaves 3 GiB for iPadOS and the app. Apply memory changes before starting JIT; changing an existing reservation requires relaunching the app.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Storage and sharing") {
@@ -382,12 +387,29 @@ struct VMConfigurationFields: View {
             }
         }
         .onAppear {
+            memoryText = String(configuration.memoryMB)
             hostPort = String(configuration.tcpForwardHostPort)
             guestPort = String(configuration.tcpForwardGuestPort)
         }
         .alert("TCP forward", isPresented: Binding(get: { portError != nil }, set: { if !$0 { portError = nil } })) {
             Button("OK") { portError = nil }
         } message: { Text(portError ?? "") }
+    }
+
+    private func saveMemory() {
+        let text = memoryText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let limit = WinIOSBridge.shared.maxGuestMemoryMB
+        guard let memory = UInt64(text), memory >= 4096, memory <= limit else {
+            memoryError = "Enter a whole number from 4096 to \(limit) MiB within this device's RAM limit."
+            return
+        }
+        var updated = configuration
+        updated.memoryMB = memory
+        do {
+            configuration = try updated.validated()
+            memoryText = String(memory)
+            memoryError = nil
+        } catch { memoryError = error.localizedDescription }
     }
 
     private func saveForward() {

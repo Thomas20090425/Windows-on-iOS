@@ -28,6 +28,9 @@ targets:
       - path: ../build/firmware/Firmware
         type: folder
         buildPhase: resources
+      - path: deps/licenses/TPM
+        type: folder
+        buildPhase: resources
     preBuildScripts:
       - name: Prepare bundled EDK2 firmware
         script: python3 "$SRCROOT/../scripts/prepare_firmware.py"
@@ -87,6 +90,8 @@ targets:
         OTHER_LDFLAGS:
           - $(inherited)
           - -lwinvm
+          - -ltpms
+          - -lcrypto
           - -lslirp
           - -lglib-2.0
           - -lintl
@@ -95,6 +100,7 @@ targets:
           - -lresolv
           - -liconv
     dependencies:
+      - sdk: GameController.framework
       - sdk: AVFoundation.framework
       - sdk: SafariServices.framework
       - sdk: Metal.framework

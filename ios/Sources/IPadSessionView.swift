@@ -4,6 +4,7 @@ import SwiftUI
 /// A resizable iPad viewport over the same native Metal/USB path used by Duo.
 struct IPadSessionView: View {
     @ObservedObject var vm: VMViewModel
+    @ObservedObject private var hardwareKeyboard = HardwareKeyboardState.shared
     @Binding var configuration: VMConfiguration
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
@@ -39,6 +40,15 @@ struct IPadSessionView: View {
                 }
                 Spacer()
             }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if vm.isVMRunning {
+                GuestFunctionKeyRow(enabled: !settingsVisible && !confirmStop && vm.activeSafariURL == nil && scenePhase == .active)
+            }
+        }
+        .onAppear { if hardwareKeyboard.isConnected { vm.systemKeyboardVisible = false } }
+        .onChange(of: hardwareKeyboard.isConnected) { _, connected in
+            if connected { vm.systemKeyboardVisible = false }
         }
         .task(id: controlsVisible && vm.isVMRunning) {
             guard controlsVisible && vm.isVMRunning else { return }
@@ -104,7 +114,9 @@ struct IPadSessionView: View {
             HStack(spacing: 14) {
                 libraryButton
                 Divider().frame(height: 24)
-                Button("Keyboard", systemImage: "keyboard") { vm.systemKeyboardVisible.toggle() }
+                if !hardwareKeyboard.isConnected {
+                    Button("Keyboard", systemImage: "keyboard") { vm.systemKeyboardVisible.toggle() }
+                }
                 shortcutMenu
                 powerMenu
                 Spacer(minLength: 0)
@@ -113,7 +125,9 @@ struct IPadSessionView: View {
             }
             HStack(spacing: 12) {
                 libraryButton.labelStyle(.iconOnly)
-                Button("Keyboard", systemImage: "keyboard") { vm.systemKeyboardVisible.toggle() }.labelStyle(.iconOnly)
+                if !hardwareKeyboard.isConnected {
+                    Button("Keyboard", systemImage: "keyboard") { vm.systemKeyboardVisible.toggle() }.labelStyle(.iconOnly)
+                }
                 shortcutMenu.labelStyle(.iconOnly)
                 powerMenu.labelStyle(.iconOnly)
                 Spacer(minLength: 0)

@@ -14,7 +14,7 @@ ENGINE = $(CORE) $(HOST)
 DEV = $(B)/acpi.o $(B)/fb_display.o $(B)/fb_metal.o $(B)/fdt.o $(B)/fw_cfg.o $(B)/gicv3.o $(B)/hda.o \
       $(B)/nvme.o $(B)/pcie.o $(B)/pflash.o $(B)/pl011.o $(B)/pl031.o $(B)/pl061.o $(B)/timer.o \
       $(B)/virtio.o $(B)/virtio_blk.o $(B)/virtio_input.o $(B)/virtio_net.o $(B)/virtio_snd.o \
-      $(B)/winvirt.o $(B)/xhci.o $(B)/usb_storage.o
+      $(B)/winvirt.o $(B)/xhci.o $(B)/usb_storage.o $(B)/tpm_crb.o
 
 VM_HOST = $(B)/winvm.o $(B)/net_slirp.o $(B)/share.o $(B)/audio_mac.o $(B)/hvsparse.o
 
@@ -73,7 +73,7 @@ $(B):
 IOS_SDK = $(shell xcrun --sdk iphoneos --show-sdk-path)
 IOS_CC = xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=17.0 -isysroot $(IOS_SDK)
 IOS_SLIRP_INC ?= ios/deps/include/slirp
-IOS_CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices -I$(IOS_SLIRP_INC)
+IOS_CFLAGS = -std=c11 -Wall -Wextra -O2 -g -Icore -Ihost -Idevices -Iios/deps/include -I$(IOS_SLIRP_INC) -DHV_HAVE_LIBTPMS=1
 IOS_OBJCFLAGS = -fobjc-arc -Wall -Wextra -O2 -g -Icore -Ihost -Idevices
 IB = build/ios
 

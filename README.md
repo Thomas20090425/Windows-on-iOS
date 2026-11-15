@@ -26,8 +26,15 @@ Normal setup now requires only your **Windows 11 ARM64 ISO** and a selected
 disk capacity. The app includes matched, redistributable EDK2 firmware, creates
 private writable NVRAM and a sparse Windows disk, attaches the ISO as a USB DVD,
 and generates removable unattended setup media. No firmware or variable-store
-import is required. Windows Setup/OOBE prompts and platform requirements still
-apply; this engine has no virtual TPM. See the installation guide for limits.
+import is required. Software TPM 2.0 is now included using libtpms, with private
+persistent keys/NV state for each VM. Windows Setup/OOBE prompts and other
+platform requirements still apply. TPM enrollment and guest boot remain
+runtime-unverified; see the installation guide for limits.
+
+Guest RAM accepts a custom whole-MiB allowance from 4096 MiB to the displayed
+device limit, with 3 GiB host headroom. Mouse buttons use direct hardware events
+and a UIKit trackpad path. F1–F12 are available onscreen; a connected physical
+keyboard hides the full software keyboard and leaves the F-key row.
 
 JIT startup now requires an explicit readiness handshake from the supplied
 helper; ordinary Xcode Run displays setup status instead of emitting unhandled
@@ -136,7 +143,7 @@ flowchart TB
     end
 
     subgraph Host["Non-Jailbroken iOS 26/27 TXM Host — Foldable iPhone Duo (iPhone19,4 · A20 Pro)"]
-        TXM["384 MiB Dual-Mapped RX/RW TXM JIT (< 0x7000000000) + 4.5 GB Ledger-Exempt Guest RAM"]
+        TXM["384 MiB Dual-Mapped RX/RW TXM JIT (< 0x7000000000) + Configured Guest RAM"]
         UI["Midnight-Sapphire Surface Laptop Ultra UI (UIHingeInteraction Clamshell / Open Studio + 120Hz Metal)"]
         IOSIO["CoreAudio RemoteIO + AudioQueueInput · SFSafariViewController Passkey/Google OAuth Sheet"]
     end
@@ -188,7 +195,7 @@ Windows 11 24H2 refuses FDT/DeviceTree boot and demands a compliant ServerReady/
 - Windows 11 binds inbox `hdaudbus.sys` + `HdAudio.sys` automatically on first boot, streaming lock-free 48 kHz S16LE playback to iOS `RemoteIO` (`AudioUnit`) and live microphone capture from iOS `AudioQueueNewInput` (`AVAudioSessionCategoryPlayAndRecord`).
 
 ### 6. 384 MiB TXM Dual-Mapped JIT + Configured Guest RAM ([`ios/Sources/Native/winios_jit.c`](ios/Sources/Native/winios_jit.c), [`scripts/optimize_windows_lite.py`](scripts/optimize_windows_lite.py))
-- **TXM Low-VA Reservation & Ledger-Exempt RAM:** On iOS 26/27 TXM devices, executable JIT mappings placed above `0x7000000000` hang in hardware. `winios_jit.c` reserves a static zero-fill region in `__DATA` below `0x180000000` at Mach-O load time, releases it right before `debugserver` `_M<size>,rx` allocation to claim a **384 MiB RX/RW dual-mapped JIT**, and uses `mach_make_memory_entry_64` + `mach_memory_entry_ownership(..., LEDGER_NO_FOOTPRINT)` (`hv_alloc_no_footprint`) while `CS_DEBUGGED` is active to pre-allocate **4,608 MiB (4.5 GB) of Jetsam-exempt Guest RAM** before LLDB detaches — leaving **~2–3 GB of free iOS Jetsam headroom**.
+- **TXM low-address reservation and configured RAM:** The iOS allocator reserves low address space before the debugger requests its **384 MiB RX/RW JIT**. During the matching helper session it attempts `hv_alloc_no_footprint` for the selected whole-MiB guest RAM allowance, leaving 3 GiB physical host headroom. Allocation and the memory-ledger behavior are OS-dependent; the app checks the actual reservation and does not promise immunity from Jetsam or silently reduce the selected RAM.
 - **Current Windows cleanup:** Optional consumer-app and visual cleanup preserves Defender, SmartScreen, Windows Update, code integrity and CPU mitigations. It no longer invokes the legacy security-disabling hive helper. No idle-RAM or performance result has been measured for this revised profile. iPad RAM admission and debugger reservation remain subject to physical-device verification.
 
 ### 7. Foldable iPhone Duo Surface Laptop Ultra UI + Native iOS `SafariSheet` OAuth Bridge ([`ios/Sources/`](ios/Sources/), [`tools/winios_browser_arm64.c`](tools/winios_browser_arm64.c))
@@ -213,7 +220,9 @@ Windows 11 24H2 refuses FDT/DeviceTree boot and demands a compliant ServerReady/
 | `0x080A_0000` | `15 MiB` | ARM GICv3 Per-vCPU Redistributors (`GICR`) | [`devices/gicv3.c`](devices/gicv3.c) |
 | `0x0900_0000` | `64 KiB` | PrimeCell `PL011` UART, `PL031` RTC (`0x09010000`), `fw_cfg` + `ramfb` (`0x09020000`), `PL061` GPIO (`0x09030000`), ACPI GED (`0x09080000`) | [`devices/winvirt.c`](devices/winvirt.c) |
 | `0x1000_0000` | `752 MiB` | PCIe 32-bit MMIO Window + PIO (`0x3EFF0000`) | [`devices/pcie.c`](devices/pcie.c) |
-| `0x4000_0000` | `4.5 GiB` | Guest System DRAM (`hv_alloc_no_footprint` on iOS) | [`devices/winvirt.c`](devices/winvirt.c) |
+| `0x090C_0000` | `64 KiB` | Software TPM 2.0 CRB (Windows ACPI) | [`devices/tpm_crb.c`](devices/tpm_crb.c) |
+| `0x090D_0000` | `64 KiB` | Same TPM's FIFO/TIS frontend (EDK2 device tree) | [`devices/tpm_crb.c`](devices/tpm_crb.c) |
+| `0x4000_0000` | Custom allowance | Guest System DRAM (`hv_alloc_no_footprint` on iOS) | [`devices/winvirt.c`](devices/winvirt.c) |
 | `0x40_1000_0000` | `256 MiB` | PCIe ECAM Configuration Space (`MCFG`) | [`devices/pcie.c`](devices/pcie.c) |
 | `0x80_0000_0000` | `512 GiB` | PCIe 64-bit High MMIO BAR Window | [`devices/pcie.c`](devices/pcie.c) |
 

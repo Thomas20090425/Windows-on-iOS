@@ -4,6 +4,7 @@
  * Adapted from Henge (Leviidev/Henge, GPL-2.0-or-later).
  */
 #include "winios_jit.h"
+#include "guest_memory.h"
 #include "winvirt.h"
 
 #include <TargetConditionals.h>
@@ -107,11 +108,10 @@ static void prealloc_ledger_exempt_ram(void) {
     uint64_t phys_mem = 0;
     size_t len = sizeof phys_mem;
     sysctlbyname("hw.memsize", &phys_mem, &len, NULL, 0);
-    uint64_t phys_mb = phys_mem >> 20;
     /* Reserve the configured Windows 11 minimum or larger, without silently
      * shrinking the guest or assuming the memory ledger exception will work. */
     uint64_t mb = g_requested_guest_mb;
-    if (mb >= 4096 && mb <= 4608 && phys_mb >= mb + 3072) {
+    if (mb >= HV_GUEST_MIN_MEMORY_MB && mb <= hv_guest_memory_limit_mb(phys_mem)) {
         uint8_t *p = hv_alloc_no_footprint(mb << 20);
         if (p) {
             g_guest_ram = p;
@@ -125,7 +125,7 @@ static void prealloc_ledger_exempt_ram(void) {
 }
 
 void winios_jit_set_guest_memory_mb(uint64_t memory_mb) {
-    if (memory_mb >= 4096 && memory_mb <= 4608 && memory_mb % 256 == 0)
+    if (memory_mb >= HV_GUEST_MIN_MEMORY_MB && memory_mb <= HV_GUEST_MAP_MAX_MEMORY_MB)
         g_requested_guest_mb = memory_mb;
 }
 

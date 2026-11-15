@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "acpi.h"
+#include "tpm_crb.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -207,7 +208,7 @@ static void aml_crs_mem32_irq(Buf *crs, uint32_t base, uint32_t len, uint32_t gs
     b_u8(crs, 0x00);
 }
 
-static void build_dsdt(Buf *tabs, int ncpus) {
+static void build_dsdt(Buf *tabs, int ncpus, int tpm_present) {
     size_t start = tabs->len;
     acpi_hdr(tabs, "DSDT", 0, 2, "WINVIRT ");
 
@@ -422,6 +423,24 @@ static void build_dsdt(Buf *tabs, int ncpus) {
         aml_device(&sb, "GED_", &ged);
         free(crs.buf);
         free(ged.buf);
+    }
+
+    if (tpm_present) {
+        /* Windows uses its inbox TPM 2.0 CRB driver through this device and
+         * the TPM2 table. The firmware-only TIS window describes the same
+         * backend in the DTB, not a second TPM in the ACPI namespace. Polling
+         * is supported; do not advertise an interrupt or physical presence
+         * methods that this platform does not implement. */
+        Buf tpm = {0}, crs = {0};
+        aml_name_str(&tpm, "_HID", "MSFT0101");
+        aml_name_int(&tpm, "_UID", 0);
+        aml_name_int(&tpm, "_STA", 0x0f);
+        aml_crs_mem32_irq(&crs, (uint32_t)HV_TPM_CRB_BASE,
+                         (uint32_t)HV_TPM_CRB_SIZE, 0, 0, 0, 0);
+        aml_name_buf(&tpm, "_CRS", crs.buf, crs.len);
+        aml_device(&sb, "TPM0", &tpm);
+        free(crs.buf);
+        free(tpm.buf);
     }
 
     /* Wrap in Scope (\_SB_) */
@@ -890,7 +909,23 @@ static void build_smbios(HvFwCfg *fw, int ncpus, uint64_t ram_size) {
     free(t.buf);
 }
 
-void hv_acpi_build_and_register(HvFwCfg *fw, int ncpus, uint64_t ram_size, int spi_msi_base, int spi_msi_count) {
+static size_t build_tpm2(Buf *tabs) {
+    size_t start = tabs->len;
+    /* TCG ACPI Specification, TPM2 table revision 4, client platform.
+     * Native CRB uses start method 7, with no platform-specific parameters.
+     * Omit the optional ACPI log fields, matching EDK2's 52-byte table when
+     * no ACPI log address is supplied. EDK2's Tcg2Dxe owns the measured-boot
+     * log and supplies it through EFI_TCG2_PROTOCOL. */
+    acpi_hdr(tabs, "TPM2", 0, 4, "WINVTPM2");
+    b_u16(tabs, 0); /* Platform class: client */
+    b_u16(tabs, 0); /* Reserved */
+    b_u64(tabs, HV_TPM_CRB_BASE + HV_TPM_CRB_CONTROL_OFFSET);
+    b_u32(tabs, 7); /* Command Response Buffer interface */
+    finalize_table(tabs, start);
+    return start;
+}
+
+void hv_acpi_build_and_register(HvFwCfg *fw, int ncpus, uint64_t ram_size, int spi_msi_base, int spi_msi_count, int tpm_present) {
     Buf tabs = {0};
     Loader ldr = {0};
 
@@ -898,13 +933,14 @@ void hv_acpi_build_and_register(HvFwCfg *fw, int ncpus, uint64_t ram_size, int s
     loader_alloc(&ldr, "etc/acpi/tables", 64, 1); /* Zone 1 = HIGH */
 
     /* 1. DSDT at offset 0 */
-    build_dsdt(&tabs, ncpus);
+    build_dsdt(&tabs, ncpus, tpm_present);
     uint32_t dsdt_len = (uint32_t)tabs.len;
     loader_add_cksum(&ldr, "etc/acpi/tables", 9, 0, dsdt_len);
 
     /* 2. Subtables referenced by XSDT */
-    size_t tbl_offs[8];
-    uint32_t tbl_lens[8];
+    size_t tbl_offs[9];
+    uint32_t tbl_lens[9];
+    int table_count = 8;
     uint32_t facp_xdsdt_ptr_off = 0;
 
     tbl_offs[0] = build_facp(&tabs, 0, &facp_xdsdt_ptr_off);
@@ -933,14 +969,20 @@ void hv_acpi_build_and_register(HvFwCfg *fw, int ncpus, uint64_t ram_size, int s
     tbl_offs[7] = build_iort(&tabs);
     tbl_lens[7] = (uint32_t)(tabs.len - tbl_offs[7]);
 
-    for (int i = 1; i < 8; i++) {
+    if (tpm_present) {
+        tbl_offs[table_count] = build_tpm2(&tabs);
+        tbl_lens[table_count] = (uint32_t)(tabs.len - tbl_offs[table_count]);
+        table_count++;
+    }
+
+    for (int i = 1; i < table_count; i++) {
         loader_add_cksum(&ldr, "etc/acpi/tables", (uint32_t)tbl_offs[i] + 9, (uint32_t)tbl_offs[i], tbl_lens[i]);
     }
 
     /* 3. XSDT */
     size_t xsdt_off = tabs.len;
     acpi_hdr(&tabs, "XSDT", 0, 1, "WINVIRT ");
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < table_count; i++) {
         uint32_t ptr_off = (uint32_t)tabs.len;
         b_u64(&tabs, (uint64_t)tbl_offs[i]);
         loader_add_ptr(&ldr, "etc/acpi/tables", "etc/acpi/tables", ptr_off, 8);

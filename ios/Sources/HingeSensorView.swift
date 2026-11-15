@@ -11,6 +11,8 @@ final class PointerController {
     var cursorX: Double = 0.5
     var cursorY: Double = 0.5
     private(set) var heldButtons: UInt8 = 0
+    private(set) var externalButtons: UInt8 = 0
+    private var allHeldButtons: UInt8 { heldButtons | externalButtons }
 
     private var clickGeneration: UInt = 0
     private var lastTapTime: CFTimeInterval = 0
@@ -22,7 +24,7 @@ final class PointerController {
     func moveAbsolute(x: Double, y: Double, extraButtons: UInt8 = 0) {
         cursorX = min(1.0, max(0.0, x))
         cursorY = min(1.0, max(0.0, y))
-        WinIOSBridge.shared.sendTabletNormalizedX(cursorX, y: cursorY, buttons: heldButtons | extraButtons, wheel: 0)
+        WinIOSBridge.shared.sendTabletNormalizedX(cursorX, y: cursorY, buttons: allHeldButtons | extraButtons, wheel: 0)
     }
 
     func moveRelative(dxPoints: CGFloat, dyPoints: CGFloat, padWidth: CGFloat, padHeight: CGFloat, extraButtons: UInt8 = 0) {
@@ -37,7 +39,7 @@ final class PointerController {
         let dy = (Double(dyPoints) / refH) * gain
         cursorX = min(1.0, max(0.0, cursorX + dx))
         cursorY = min(1.0, max(0.0, cursorY + dy))
-        WinIOSBridge.shared.sendTabletNormalizedX(cursorX, y: cursorY, buttons: heldButtons | extraButtons, wheel: 0)
+        WinIOSBridge.shared.sendTabletNormalizedX(cursorX, y: cursorY, buttons: allHeldButtons | extraButtons, wheel: 0)
     }
 
     func setHeldButton(_ mask: UInt8, down: Bool) {
@@ -46,18 +48,29 @@ final class PointerController {
         } else {
             heldButtons &= ~mask
         }
-        WinIOSBridge.shared.sendTabletNormalizedX(cursorX, y: cursorY, buttons: heldButtons, wheel: 0)
+        WinIOSBridge.shared.sendTabletNormalizedX(cursorX, y: cursorY, buttons: allHeldButtons, wheel: 0)
+    }
+
+    /// Real pointer contacts must survive hover/scroll and delayed tap releases.
+    func setExternalButtons(_ mask: UInt8) {
+        let buttons = mask & 7
+        guard externalButtons != buttons else { return }
+        externalButtons = buttons
+        // A hardware edge supersedes any queued touch tap at stale coordinates.
+        clickGeneration &+= 1
+        WinIOSBridge.shared.sendTabletNormalizedX(cursorX, y: cursorY, buttons: allHeldButtons, wheel: 0)
     }
 
     func scroll(steps: Int8, horizontalSteps: Int8 = 0) {
         guard steps != 0 || horizontalSteps != 0 else { return }
-        WinIOSBridge.shared.sendTabletNormalizedX(cursorX, y: cursorY, buttons: heldButtons,
+        WinIOSBridge.shared.sendTabletNormalizedX(cursorX, y: cursorY, buttons: allHeldButtons,
                                                   wheel: steps, horizontalWheel: horizontalSteps)
     }
 
     func releaseAllButtons() {
         clickGeneration &+= 1
         heldButtons = 0
+        externalButtons = 0
         WinIOSBridge.shared.sendTabletNormalizedX(cursorX, y: cursorY, buttons: 0, wheel: 0)
     }
 
@@ -67,7 +80,7 @@ final class PointerController {
         let now = CACurrentMediaTime()
         let dist = hypot(x - lastTapX, y - lastTapY)
         if now - lastTapTime < 0.40 && dist < 0.045 {
-            // Snap rapid second tap to the exact pixel of the first tap so Win32 double-clicks register 100% reliably!
+            // Keep rapid successive taps at the same guest pixel.
             cursorX = lastTapX
             cursorY = lastTapY
         } else {
@@ -82,15 +95,15 @@ final class PointerController {
         let tx = cursorX
         let ty = cursorY
         // 1. Move cursor onto target so XAML hover states engage
-        WinIOSBridge.shared.sendTabletNormalizedX(tx, y: ty, buttons: heldButtons, wheel: 0)
+        WinIOSBridge.shared.sendTabletNormalizedX(tx, y: ty, buttons: allHeldButtons, wheel: 0)
         // 2. Press button after 14 ms
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.014) { [weak self] in
             guard let self, self.clickGeneration == generation else { return }
-            WinIOSBridge.shared.sendTabletNormalizedX(tx, y: ty, buttons: self.heldButtons | buttonMask, wheel: 0)
+            WinIOSBridge.shared.sendTabletNormalizedX(tx, y: ty, buttons: self.allHeldButtons | buttonMask, wheel: 0)
             // 3. Release button after 55 ms
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.055) { [weak self] in
                 guard let self, self.clickGeneration == generation else { return }
-                WinIOSBridge.shared.sendTabletNormalizedX(tx, y: ty, buttons: self.heldButtons, wheel: 0)
+                WinIOSBridge.shared.sendTabletNormalizedX(tx, y: ty, buttons: self.allHeldButtons, wheel: 0)
             }
         }
     }
@@ -100,10 +113,10 @@ final class PointerController {
         let generation = clickGeneration
         let tx = cursorX
         let ty = cursorY
-        WinIOSBridge.shared.sendTabletNormalizedX(tx, y: ty, buttons: heldButtons | buttonMask, wheel: 0)
+        WinIOSBridge.shared.sendTabletNormalizedX(tx, y: ty, buttons: allHeldButtons | buttonMask, wheel: 0)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.048) { [weak self] in
             guard let self, self.clickGeneration == generation else { return }
-            WinIOSBridge.shared.sendTabletNormalizedX(tx, y: ty, buttons: self.heldButtons, wheel: 0)
+            WinIOSBridge.shared.sendTabletNormalizedX(tx, y: ty, buttons: self.allHeldButtons, wheel: 0)
         }
     }
 }

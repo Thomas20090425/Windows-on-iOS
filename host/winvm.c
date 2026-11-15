@@ -20,6 +20,7 @@
 #include "dispatch.h"
 #include "net_slirp.h"
 #include "share.h"
+#include "guest_memory.h"
 
 static HvMachine m;
 static HvCpu cpus[HV_MAX_CPUS];
@@ -45,6 +46,9 @@ int hv_winvm_share_up(void) { return share_on; }
 int hv_winvm_network_up(void) { return net_on; }
 HvMachine *hv_winvm_machine(void) { return &m; }
 HvWinVirt *hv_winvm_board(void) { return &board; }
+const char *hv_winvm_last_error(void) {
+    return board.tpm ? hv_tpm_crb_error(board.tpm) : NULL;
+}
 
 const char *hv_winvm_reason_name(int r) {
     switch (r) {
@@ -58,6 +62,13 @@ const char *hv_winvm_reason_name(int r) {
 
 static void board_poll(void) {
     if (net_on) hv_net_poll();
+    const char *tpm_error = hv_winvm_last_error();
+    if (tpm_error && *tpm_error && !atomic_exchange(&stop_requested, 1)) {
+        fprintf(stderr, "winvm: stopping after TPM failure: %s\n", tpm_error);
+        for (int i = 0; i < ncpus; i++) cpus[i].halted = 3;
+        hv_machine_kick_all(&m);
+        for (int i = 0; i < ncpus; i++) hv_cpu_wake(&cpus[i]);
+    }
 }
 
 static int fail(char *err, size_t n, const char *msg) {
@@ -149,6 +160,8 @@ int hv_winvm_save_png(const char *path) {
 int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
     if (!c || !c->code_fd || !c->vars_fd)
         return fail(err, errlen, "UEFI firmware (code.fd) and NVRAM (vars.fd) are required.");
+    if (c->ram_mb > HV_GUEST_MAP_MAX_MEMORY_MB)
+        return fail(err, errlen, "Guest RAM exceeds the virtual machine's physical memory map.");
 
     atomic_store(&stop_requested, 0);
 
@@ -198,7 +211,8 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
     uint64_t ram_bytes = (c->ram_mb ? c->ram_mb : 4096ULL) << 20;
     static const uint8_t mac[6] = {0x02, 0x57, 0x49, 0x4e, 0x00, 0x01};
     if (hv_winvirt_create(&board, &m, cpus, ncpus, ram_bytes, c->prealloc_ram, c->code_fd, c->vars_fd,
-                          d0_ptr, d1_ptr, mac, c->enable_sound) != 0) {
+                          d0_ptr, d1_ptr, mac, c->enable_sound, c->tpm_state_dir, err, errlen) != 0) {
+        if (err && errlen && *err) return -1;
         return fail(err, errlen, "Cannot create virtual ARM64 Windows board (insufficient RAM or missing firmware).");
     }
     hv_winvirt_reset_cpu(&board);
@@ -279,6 +293,7 @@ static void join_secondaries(void) {
 
 void hv_winvm_flush_disks(void) {
     if (disk0.fd >= 0) hv_disk_sync(&disk0);
+    if (board.tpm) (void)hv_tpm_crb_flush(board.tpm);
 }
 
 int hv_winvm_run_cpu0(void) {
@@ -290,6 +305,16 @@ int hv_winvm_run_cpu0(void) {
         if (cpus[0].halted == 2 && !atomic_load(&stop_requested)) {
             fprintf(stderr, "winvm: guest requested PSCI SYSTEM_RESET — rebooting...\n");
             join_secondaries();
+            /* Reset volatile TPM/locality state while retaining the same NV
+             * identity. Never continue a reboot with lost or unwritable keys. */
+            hv_dev_lock(&m);
+            int tpm_reset_failed = board.tpm && hv_tpm_crb_reset(board.tpm) != 0;
+            hv_dev_unlock(&m);
+            if (tpm_reset_failed) {
+                fprintf(stderr, "winvm: TPM reset failed: %s\n", hv_winvm_last_error());
+                atomic_store(&stop_requested, 1);
+                return HV_EXIT_HALT;
+            }
             /* Unattended disk partitioning is authorized only for the fresh
              * app-created target. Once any boot-sector data exists, remove
              * the answer LUN before firmware re-enumeration on warm reset. */

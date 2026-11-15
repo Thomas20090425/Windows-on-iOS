@@ -1,0 +1,14 @@
+--- a/src/tpm2/Entropy.c
++++ b/src/tpm2/Entropy.c
+@@ -129,7 +129,10 @@
+     // libtpms added begin
+     if (amount > 0 && RAND_bytes(entropy, amount) == 1)
+         return amount;
+-    // fall back to 'original' method
++    // WindowsiOS: a failed CSPRNG must not fall back to simulator rand().
++    if (amount > 0)
++        return -1;
++    // Retain the upstream amount == 0 reset path only.
+     // libtpms added end
+ 
+     if(amount == 0)

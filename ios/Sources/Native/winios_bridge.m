@@ -4,6 +4,7 @@
 #include "hvsparse.h"
 #include "share.h"
 #include "winios_jit.h"
+#include "guest_memory.h"
 #include "winvm.h"
 #include <TargetConditionals.h>
 #include <fcntl.h>
@@ -61,7 +62,8 @@ static WinIOSBridge *s_shared_bridge = nil;
 @end
 
 static void vm_exit_trampoline(int reason) {
-    NSString *r = [NSString stringWithUTF8String:hv_winvm_reason_name(reason)];
+    const char *detail = hv_winvm_last_error();
+    NSString *r = [NSString stringWithUTF8String:detail && *detail ? detail : hv_winvm_reason_name(reason)];
     dispatch_async(dispatch_get_main_queue(), ^{
         [s_shared_bridge handleVMExitWithReason:r];
     });
@@ -298,9 +300,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 - (uint64_t)maxGuestMemoryMB {
     /* Conservative admission policy, not a guarantee against Jetsam. Leave
      * physical headroom for iPadOS, dual JIT mappings, translation tables and UI. */
-    uint64_t physicalMB = NSProcessInfo.processInfo.physicalMemory >> 20;
-    uint64_t maximum = physicalMB > 3072 ? ((physicalMB - 3072) & ~255ull) : 0;
-    return MIN(maximum, 4608ull);
+    return hv_guest_memory_limit_mb(NSProcessInfo.processInfo.physicalMemory);
 }
 
 - (NSString *)runtimeCapabilityText {
@@ -364,8 +364,8 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         [self notifyChanged];
         return NO;
     }
-    if (memoryMB < 4096 || memoryMB > self.maxGuestMemoryMB || (memoryMB % 256) != 0 || cpuCount < 1 || cpuCount > 4) {
-        _vmStatus = @"Invalid configuration: choose 1–4 CPUs and 4–4.5 GiB RAM within this device's limit.";
+    if (memoryMB < HV_GUEST_MIN_MEMORY_MB || memoryMB > self.maxGuestMemoryMB || cpuCount < 1 || cpuCount > 4) {
+        _vmStatus = [NSString stringWithFormat:@"Choose 1–4 CPUs and a RAM allowance from 4096 to %llu MiB.", (unsigned long long)self.maxGuestMemoryMB];
         [self notifyChanged];
         return NO;
     }
@@ -593,8 +593,9 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
     uint64_t preallocBytes = 0;
     void *preallocRam = winios_jit_guest_ram(&preallocBytes);
-    uint64_t ramMB = MIN(_requestedRamMB, self.maxGuestMemoryMB);
-    if (ramMB < 4096 || (preallocRam && preallocBytes < (ramMB << 20)) ||
+    uint64_t ramMB = _requestedRamMB;
+    if (ramMB < HV_GUEST_MIN_MEMORY_MB || ramMB > self.maxGuestMemoryMB ||
+        (preallocRam && preallocBytes != (ramMB << 20)) ||
         (!preallocRam && [self availableMemoryMB] < ramMB + 1024)) {
         _vmStatus = @"Insufficient guest RAM reservation. Relaunch with the selected memory setting and attach the JIT helper; no unsafe low-memory fallback was used.";
         [self notifyChanged];
@@ -610,6 +611,25 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
     NSString *codePath = [self firmwarePathForDirectory:dir];
     NSString *varsPath = [dir stringByAppendingPathComponent:@"vars.fd"];
+    NSString *tpmStatePath = [dir stringByAppendingPathComponent:@"TPM"];
+    NSString *tpmBindingPath = [dir stringByAppendingPathComponent:@"tpm-state-initialized"];
+    NSData *tpmBindingData = [@"WindowsiOS TPM 2.0 identity initialized\n" dataUsingEncoding:NSUTF8StringEncoding];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:tpmBindingPath] &&
+        (![[NSData dataWithContentsOfFile:tpmBindingPath] isEqualToData:tpmBindingData] ||
+         ![[NSFileManager defaultManager] fileExistsAtPath:[tpmStatePath stringByAppendingPathComponent:@"identity"]] ||
+         ![[NSFileManager defaultManager] fileExistsAtPath:[tpmStatePath stringByAppendingPathComponent:@"permall"]])) {
+        _vmStatus = @"This VM's existing TPM state is missing or damaged. Restore its TPM folder together with its Windows disk; a replacement identity was not created.";
+        [self notifyChanged];
+        return;
+    }
+    NSError *tpmDirectoryError = nil;
+    if (![[NSFileManager defaultManager] createDirectoryAtPath:tpmStatePath withIntermediateDirectories:YES
+            attributes:@{NSFileProtectionKey: NSFileProtectionCompleteUntilFirstUserAuthentication}
+            error:&tpmDirectoryError]) {
+        _vmStatus = [NSString stringWithFormat:@"Cannot open this VM's TPM state: %@", tpmDirectoryError.localizedDescription];
+        [self notifyChanged];
+        return;
+    }
     NSString *diskPath = [dir stringByAppendingPathComponent:@"windows11.img"];
     NSString *secondaryDisk = [dir stringByAppendingPathComponent:@"secondary.img"];
     BOOL hasSecondaryDisk = [[NSFileManager defaultManager] fileExistsAtPath:secondaryDisk];
@@ -625,6 +645,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     HvWinVmConfig cfg = {
         .code_fd = codePath.fileSystemRepresentation,
         .vars_fd = varsPath.fileSystemRepresentation,
+        .tpm_state_dir = tpmStatePath.fileSystemRepresentation,
         .disk0 = diskPath.fileSystemRepresentation,
         .disk1 = hasSecondaryDisk ? secondaryDisk.fileSystemRepresentation : NULL,
         .share_dir = _sharedFolderEnabled && _networkEnabled ? sharedDir.fileSystemRepresentation : NULL,
@@ -655,6 +676,13 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     if (hv_winvm_create(&cfg, err, sizeof err) != 0) {
         _vmStatus = [NSString stringWithFormat:@"VM create failed: %s", err];
         dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
+        [self notifyChanged];
+        return;
+    }
+    /* Keep a binding marker outside the TPM directory so removal of that
+     * entire folder cannot silently manufacture replacement keys next time. */
+    if (![tpmBindingData writeToFile:tpmBindingPath options:NSDataWritingAtomic error:&tpmDirectoryError]) {
+        _vmStatus = [NSString stringWithFormat:@"Cannot record this VM's TPM identity: %@. Close and relaunch before retrying.", tpmDirectoryError.localizedDescription];
         [self notifyChanged];
         return;
     }

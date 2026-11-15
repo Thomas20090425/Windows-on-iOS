@@ -1,8 +1,73 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+import GameController
 import Metal
 import QuartzCore
 import SwiftUI
 import UIKit
+
+/// Observe trackpad/mouse contacts before other gestures can cancel UIView
+/// delivery. This recognizer never claims or prevents another gesture.
+private final class HardwarePointerTouchObserver: UIGestureRecognizer {
+    var onPointerTouches: ((Set<UITouch>, UIEvent, Bool) -> Void)?
+    private var activeTouches: Set<UITouch> = []
+
+    override init(target: Any?, action: Selector?) {
+        super.init(target: target, action: action)
+        configure()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(target: nil, action: nil)
+        configure()
+    }
+
+    private func configure() {
+        allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesBegan(touches, with: event)
+        activeTouches.formUnion(touches)
+        onPointerTouches?(touches, event, false)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesMoved(touches, with: event)
+        onPointerTouches?(touches, event, false)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesEnded(touches, with: event)
+        onPointerTouches?(touches, event, false)
+        activeTouches.subtract(touches)
+        if activeTouches.isEmpty { state = .failed }
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesCancelled(touches, with: event)
+        onPointerTouches?(touches, event, true)
+        activeTouches.subtract(touches)
+        if activeTouches.isEmpty { state = .failed }
+    }
+
+    override func reset() {
+        super.reset()
+        activeTouches.removeAll()
+    }
+
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
+        _ = super.canPrevent(preventedGestureRecognizer)
+        return false
+    }
+
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool {
+        _ = super.canBePrevented(by: preventingGestureRecognizer)
+        return false
+    }
+}
 
 final class MetalCanvasUIView: UIView, UIKeyInput {
     override class var layerClass: AnyClass { CAMetalLayer.self }
@@ -21,7 +86,13 @@ final class MetalCanvasUIView: UIView, UIKeyInput {
     private weak var fingerScrollRecognizer: UIPanGestureRecognizer?
     var softwareKeyboardVisible = false
     private let hiddenKeyboardView = UIView(frame: .zero)
-    private var physicalButtons: UInt8 = 0
+    private var rawPhysicalButtons: UInt8 = 0
+    private var mouseButtonMasks: [ObjectIdentifier: UInt8] = [:]
+    private var monitoredMice: [ObjectIdentifier: GCMouse] = [:]
+    private static weak var mouseCaptureOwner: MetalCanvasUIView?
+    private weak var mouseHoverRecognizer: UIHoverGestureRecognizer?
+    private var hardwarePointerPoint: CGPoint?
+    private var physicalButtons: UInt8 { mouseButtonMasks.values.reduce(rawPhysicalButtons, |) }
     private var pencilButton: UInt8 = 0
     private var pressedUsages: Set<UInt8> = []
     private var physicalKeyMap: [UInt8: UInt8] = [:]
@@ -55,6 +126,12 @@ final class MetalCanvasUIView: UIView, UIKeyInput {
         metalLayer.framebufferOnly = true
         metalLayer.contentsGravity = .resizeAspect
         updateDrawableScale()
+
+        let pointerTouches = HardwarePointerTouchObserver(target: nil, action: nil)
+        pointerTouches.onPointerTouches = { [weak self] touches, event, cancelled in
+            _ = self?.handlePointerTouches(touches, event: event, cancelled: cancelled)
+        }
+        addGestureRecognizer(pointerTouches)
 
         let singleTap = UITapGestureRecognizer(target: self, action: #selector(handleSingleTap(_:)))
         singleTap.numberOfTouchesRequired = 1
@@ -98,7 +175,12 @@ final class MetalCanvasUIView: UIView, UIKeyInput {
 
         if #available(iOS 13.4, *) {
             let hover = UIHoverGestureRecognizer(target: self, action: #selector(handleHover(_:)))
+            hover.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+            mouseHoverRecognizer = hover
             addGestureRecognizer(hover)
+            let pencilHover = UIHoverGestureRecognizer(target: self, action: #selector(handleHover(_:)))
+            pencilHover.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
+            addGestureRecognizer(pencilHover)
             let wheel = UIPanGestureRecognizer(target: self, action: #selector(handleTwoFingerScroll(_:)))
             wheel.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
             wheel.allowedScrollTypesMask = .all
@@ -107,6 +189,12 @@ final class MetalCanvasUIView: UIView, UIKeyInput {
         }
         NotificationCenter.default.addObserver(self, selector: #selector(releaseInput),
                                                name: UIApplication.willResignActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(mouseDidConnect(_:)),
+                                               name: .GCMouseDidConnect, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(mouseDidDisconnect(_:)),
+                                               name: .GCMouseDidDisconnect, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(windowResignedKey(_:)),
+                                               name: UIWindow.didResignKeyNotification, object: nil)
     }
 
     deinit { NotificationCenter.default.removeObserver(self) }
@@ -116,10 +204,109 @@ final class MetalCanvasUIView: UIView, UIKeyInput {
         updateDrawableScale()
         if window != nil {
             WinIOSBridge.shared.bindMetalLayer(metalLayer)
+            startHardwareMouseCapture()
             if inputEnabled { becomeFirstResponder() }
         } else {
+            stopHardwareMouseCapture()
             releaseInput()
         }
+    }
+
+    private func startHardwareMouseCapture() {
+        if Self.mouseCaptureOwner !== self {
+            Self.mouseCaptureOwner?.stopHardwareMouseCapture()
+            Self.mouseCaptureOwner = self
+        }
+        for mouse in GCMouse.mice() { monitorMouse(mouse) }
+    }
+
+    private func stopHardwareMouseCapture() {
+        if Self.mouseCaptureOwner === self {
+            for mouse in monitoredMice.values {
+                mouse.mouseInput?.leftButton.pressedChangedHandler = nil
+                mouse.mouseInput?.rightButton?.pressedChangedHandler = nil
+                mouse.mouseInput?.middleButton?.pressedChangedHandler = nil
+            }
+            Self.mouseCaptureOwner = nil
+        }
+        monitoredMice.removeAll()
+        mouseButtonMasks.removeAll()
+        rawPhysicalButtons = 0
+        hardwarePointerPoint = nil
+        updateExternalButtons()
+    }
+
+    private func monitorMouse(_ mouse: GCMouse) {
+        let identifier = ObjectIdentifier(mouse)
+        guard monitoredMice[identifier] == nil, let input = mouse.mouseInput else { return }
+        monitoredMice[identifier] = mouse
+        mouse.handlerQueue = .main
+        installMouseButton(input.leftButton, mask: 1, mouse: mouse)
+        installMouseButton(input.rightButton, mask: 2, mouse: mouse)
+        installMouseButton(input.middleButton, mask: 4, mouse: mouse)
+    }
+
+    private func installMouseButton(_ button: GCControllerButtonInput?, mask: UInt8, mouse: GCMouse) {
+        button?.pressedChangedHandler = { [weak self, weak mouse] _, _, pressed in
+            DispatchQueue.main.async { [weak self, weak mouse] in
+                guard let self, let mouse, Self.mouseCaptureOwner === self,
+                      self.monitoredMice[ObjectIdentifier(mouse)] != nil else { return }
+                self.hardwareMouseButton(mouse, mask: mask, down: pressed)
+            }
+        }
+    }
+
+    private func hardwareMouseButton(_ mouse: GCMouse, mask: UInt8, down: Bool) {
+        let identifier = ObjectIdentifier(mouse)
+        var buttons = mouseButtonMasks[identifier] ?? 0
+        if down {
+            guard inputEnabled, let point = hardwarePointerPoint, pointerIsOverCanvas(point) else { return }
+            if !isFirstResponder { _ = becomeFirstResponder() }
+            guard isFirstResponder else { return }
+            let (nx, ny) = normalizedPoint(for: point)
+            PointerController.shared.moveAbsolute(x: nx, y: ny)
+            buttons |= mask
+        } else {
+            // A release remains valid after leaving the canvas or losing focus.
+            // Also clear a stale raw UIKit bit if its end event was cancelled.
+            if buttons & mask != 0 { rawPhysicalButtons &= ~mask }
+            buttons &= ~mask
+        }
+        mouseButtonMasks[identifier] = buttons
+        updateExternalButtons()
+    }
+
+    private func pointerIsOverCanvas(_ point: CGPoint) -> Bool {
+        guard let window, window.isKeyWindow,
+              window.windowScene?.activationState == .foregroundActive,
+              !isHidden, alpha > 0, bounds.contains(point),
+              let hit = window.hitTest(convert(point, to: window), with: nil) else { return false }
+        return hit === self || hit.isDescendant(of: self)
+    }
+
+    private func updateExternalButtons() {
+        PointerController.shared.setExternalButtons(physicalButtons | pencilButton)
+    }
+
+    @objc private func mouseDidConnect(_ notification: Notification) {
+        guard Self.mouseCaptureOwner === self, let mouse = notification.object as? GCMouse else { return }
+        monitorMouse(mouse)
+    }
+
+    @objc private func mouseDidDisconnect(_ notification: Notification) {
+        guard Self.mouseCaptureOwner === self, let mouse = notification.object as? GCMouse else { return }
+        let identifier = ObjectIdentifier(mouse)
+        mouse.mouseInput?.leftButton.pressedChangedHandler = nil
+        mouse.mouseInput?.rightButton?.pressedChangedHandler = nil
+        mouse.mouseInput?.middleButton?.pressedChangedHandler = nil
+        rawPhysicalButtons &= ~(mouseButtonMasks.removeValue(forKey: identifier) ?? 0)
+        monitoredMice.removeValue(forKey: identifier)
+        updateExternalButtons()
+    }
+
+    @objc private func windowResignedKey(_ notification: Notification) {
+        guard let lostWindow = notification.object as? UIWindow, lostWindow === window else { return }
+        releaseInput()
     }
 
     override func layoutSubviews() {
@@ -267,9 +454,19 @@ final class MetalCanvasUIView: UIView, UIKeyInput {
     }
 
     @objc private func handleHover(_ gr: UIHoverGestureRecognizer) {
+        if gr === mouseHoverRecognizer {
+            if gr.state == .ended || gr.state == .cancelled || gr.state == .failed {
+                // Keep an in-canvas position available to a queued button edge;
+                // a pointer leaving the visible canvas must lose capture.
+                let point = gr.location(in: self)
+                hardwarePointerPoint = pointerIsOverCanvas(point) ? point : nil
+                return
+            }
+            hardwarePointerPoint = gr.location(in: self)
+        }
         guard inputEnabled, gr.state == .began || gr.state == .changed else { return }
         let (nx, ny) = normalizedPoint(for: gr.location(in: self))
-        PointerController.shared.moveAbsolute(x: nx, y: ny, extraButtons: physicalButtons | pencilButton)
+        PointerController.shared.moveAbsolute(x: nx, y: ny)
     }
 
     // Mouse/Pencil contacts use raw touches; finger gestures above remain separate.
@@ -290,29 +487,45 @@ final class MetalCanvasUIView: UIView, UIKeyInput {
             let contact = !cancelled && touch.phase != .ended && touch.phase != .cancelled
             if !contact { pencilButton = 0 }
             let samples = event?.coalescedTouches(for: touch) ?? [touch]
+            let firstPoint = (samples.first ?? touch).preciseLocation(in: self)
+            let (firstX, firstY) = normalizedPoint(for: firstPoint)
+            PointerController.shared.moveAbsolute(x: firstX, y: firstY)
+            updateExternalButtons()
             for sample in samples {
                 let (nx, ny) = normalizedPoint(for: sample.preciseLocation(in: self))
-                PointerController.shared.moveAbsolute(x: nx, y: ny, extraButtons: physicalButtons | pencilButton)
+                PointerController.shared.moveAbsolute(x: nx, y: ny)
             }
         } else {
-            physicalButtons = cancelled ? 0 : UInt8((event?.buttonMask.rawValue ?? 0) & 7)
-            let (nx, ny) = normalizedPoint(for: touch.location(in: self))
-            PointerController.shared.moveAbsolute(x: nx, y: ny, extraButtons: physicalButtons | pencilButton)
+            let point = touch.location(in: self)
+            let contact = !cancelled && touch.phase != .ended && touch.phase != .cancelled
+            if contact { hardwarePointerPoint = point }
+            rawPhysicalButtons = contact ? UInt8((event?.buttonMask.rawValue ?? 0) & 7) : 0
+            let (nx, ny) = normalizedPoint(for: point)
+            PointerController.shared.moveAbsolute(x: nx, y: ny)
+            updateExternalButtons()
         }
         return true
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if !handlePointerTouches(touches, event: event) { super.touchesBegan(touches, with: event) }
+        let remaining = Set(touches.filter { $0.type != .indirectPointer })
+        guard !remaining.isEmpty else { return }
+        if !handlePointerTouches(remaining, event: event) { super.touchesBegan(remaining, with: event) }
     }
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if !handlePointerTouches(touches, event: event) { super.touchesMoved(touches, with: event) }
+        let remaining = Set(touches.filter { $0.type != .indirectPointer })
+        guard !remaining.isEmpty else { return }
+        if !handlePointerTouches(remaining, event: event) { super.touchesMoved(remaining, with: event) }
     }
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if !handlePointerTouches(touches, event: event) { super.touchesEnded(touches, with: event) }
+        let remaining = Set(touches.filter { $0.type != .indirectPointer })
+        guard !remaining.isEmpty else { return }
+        if !handlePointerTouches(remaining, event: event) { super.touchesEnded(remaining, with: event) }
     }
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if !handlePointerTouches(touches, event: event, cancelled: true) { super.touchesCancelled(touches, with: event) }
+        let remaining = Set(touches.filter { $0.type != .indirectPointer })
+        guard !remaining.isEmpty else { return }
+        if !handlePointerTouches(remaining, event: event, cancelled: true) { super.touchesCancelled(remaining, with: event) }
     }
 
     // MARK: - Software & Hardware Keyboard (USB HID Page 0x07)
@@ -417,7 +630,9 @@ final class MetalCanvasUIView: UIView, UIKeyInput {
         physicalKeyMap.removeAll()
         for usage in pressedUsages.sorted() { WinIOSBridge.shared.sendKeyHid(usage, down: false) }
         pressedUsages.removeAll()
-        physicalButtons = 0
+        rawPhysicalButtons = 0
+        mouseButtonMasks.removeAll()
+        hardwarePointerPoint = nil
         pencilButton = 0
         activeDragButtons = 0
         PointerController.shared.releaseAllButtons()
@@ -583,8 +798,9 @@ struct MetalDisplayView: UIViewRepresentable {
         uiView.rightClickArmed = rightClickArmed
         uiView.onThreeFingerTap = onThreeFingerTap
         uiView.inputEnabled = inputEnabled
-        if uiView.softwareKeyboardVisible != keyboardVisible {
-            uiView.softwareKeyboardVisible = keyboardVisible
+        let showSoftwareKeyboard = keyboardVisible && GCKeyboard.coalesced == nil
+        if uiView.softwareKeyboardVisible != showSoftwareKeyboard {
+            uiView.softwareKeyboardVisible = showSoftwareKeyboard
             uiView.reloadInputViews()
         }
         if inputEnabled && !uiView.isFirstResponder && uiView.window != nil {

@@ -4,7 +4,7 @@ Date: **2026-11-15**, America/Toronto. Target: **Windows 11 24H2 ARM64**,
 confirmed by the user. Branch: `codex/ipad-24h2-build`.
 Initial universal-app implementation commit: `69b2e7e`. This report now covers
 the ISO-only setup correction `01b9340`, startup/deletion correction `99dbef2`,
-and rebuilt artifacts.
+and the software TPM 2.0, mouse-button, custom RAM and F-key update.
 
 ## Verification scope
 
@@ -20,14 +20,16 @@ they do not validate the subsequently added app/device changes.
 | Deliverable/check | Result | Evidence and limit |
 | --- | --- | --- |
 | Native ARM64 iOS engine archive | **COMPILED** | `build/ios/libwinvm.a`, included in final signed app build. |
-| Universal Swift/Objective-C/native application | **COMPILED** | `build/logs/ios-app-build-jit-delete-signed.log` ends with `BUILD SUCCEEDED`; includes startup guard, deletion, ISO wizard and USB optical transport. |
-| Xcode Debug configuration | **COMPILED** | `build/logs/ios-app-build-jit-delete-debug.log` ends with `BUILD SUCCEEDED`; generic arm64 device build only, not app/debugger execution. |
+| Universal Swift/Objective-C/native application | **COMPILED** | `build/logs/ios-app-build-tpm-input-signed.log` ends with `BUILD SUCCEEDED`; includes software TPM 2.0, custom RAM entry, mouse-button changes and F1–F12 UI, plus prior startup/deletion/ISO work. |
+| Xcode Debug configuration | **EARLIER BUILD COMPILED** | `build/logs/ios-app-build-jit-delete-debug.log` covers the earlier startup/deletion changes. The current TPM/input artifact was built in Release; no Debug runtime or device execution. |
 | iPad device-target compilation | **COMPILED** | Generic `iphoneos` arm64 build; bundled `UIDeviceFamily` includes 2. No device run. |
 | Duo/iPhone device-target compilation | **COMPILED** | Same universal arm64 artifact includes family 1; manual posture layout retained. Future hinge API excluded by SDK guard. No Duo run. |
 | iOS dependencies | **COMPILED** | libffi 3.5.0, GLib 2.83.0, libslirp 4.9.1 and linked dependency archives staged in `ios/deps/`. |
 | Signed app/IPA | **BUILT, SIGNATURE CHECKED** | `distribution/WindowsiOS.app`, `distribution/WindowsiOS-development.ipa`; `codesign --verify --strict` succeeded; IPA has `Payload/WindowsiOS.app`. |
 | Build metadata | **RECORDED** | `distribution/BUILD_INFO.json`: arm64, iOS minimum 17.0, SDK 26.5, Xcode 26.6 (17F113), families [1,2]. |
 | Bundled UEFI/variable template | **PACKAGED, HASHES CHECKED** | Matched 64 MiB `Firmware/code.fd` and `vars-template.fd` included in signed app. Pinned Debian EDK2 2025.02-8+deb13u1 package; manifest records hashes. Full licenses/provenance included. This proves packaged bytes, not firmware execution. |
+| Software TPM 2.0 | **COMPILED; NOT RUNTIME-TESTED** | Static iOS arm64 libtpms 0.10.2 + OpenSSL 3.5.9. Actual command backend, CRB/FIFO MMIO, ACPI/FDT discovery, per-VM atomic NV storage, identity binding and reset/error handling compile. Library source/API and bundled firmware configuration reviewed. No TPM command, key-persistence, measured-boot, Windows enrollment or BitLocker workload executed. |
+| Mouse buttons, numeric RAM and F1–F12 | **COMPILED; NOT DEVICE-TESTED** | Direct hardware button callbacks and passive UIKit pointer observation, held-state preservation, custom whole-MiB RAM with shared native bounds, hardware keyboard detection and actual guest F-key HID usages compile. No physical mouse/keyboard or RAM-allocation behavior verified. |
 | Baseline core regressions | **PASSED BEFORE SCOPE CHANGE** | `build/logs/core-baseline.log`: classifier 43 cases, operands 36 cases, JIT 10 programs × 2 seeds, memory 12 programs × 3 modes + MMIO, MMU 76 checks, exceptions 53 checks; all reported zero failures. JIT-region baseline also completed. No rerun after source changes. |
 | New input/UI/config/lifecycle/storage tests | **NOT RUN — USER REQUEST** | Source and build checks only; no runtime assertions claimed. |
 | JIT helper correction and VM deletion | **COMPILED; NOT RUNTIME-TESTED** | Release/Debug compile; exported readiness word and exact assembly trap labels are present in the packaged Mach-O. Python/JavaScript helper syntax checks passed. No helper attachment or user VM deletion executed. |
@@ -52,7 +54,7 @@ No credentials or provisioning files were added to Git.
 IPA SHA-256:
 
 ```text
-4452465386d9fbf19088ec8d4df720c2450d053c3fe0d39d6905cad333085211
+28ac48da536b5fa087d8a4e6446359a83243fcb2c410f0fe66c68e4b40c321c6
 ```
 
 ## Build issues resolved
@@ -210,10 +212,29 @@ on warm reboot and is not attached to a nonblank target on later app launches.
 The answer chooses the ISO's first image and accepts its setup EULA; product
 licensing and normal account/OOBE screens may still require user input.
 
-The engine has no virtual TPM. Windows Setup may reject that platform, and
-some ISOs may request a boot keypress. No TPM/Secure Boot requirement bypass
+The app now links a real software TPM 2.0 using libtpms, with genuine FIFO/TIS
+for the bundled firmware and CRB plus `MSFT0101`/TPM2 ACPI discovery for Windows.
+Each VM has its own persistent NV state and an outer binding marker; damaged
+or missing established state is preserved/rejected instead of manufacturing
+replacement keys. The firmware package enables its TPM2/measurement components
+in source. This is not hardware-backed TPM attestation or proof of guest TPM
+recognition, measured boot, key persistence or BitLocker recovery. Windows Setup
+may reject other platform requirements, and some ISOs may request a boot keypress.
+No TPM/Secure Boot requirement bypass
 or security-disabling registry changes were introduced. The USB and unattended
 paths compile, but cannot be presented as a proven automatic installation.
+
+The final TPM/input Release app links `TPMLIB_Process` and its actual CRB/FIFO
+device implementation; its `TPM/` resources include dependency provenance,
+full licenses and the entropy-failure patch. A fresh local launch-symbol
+manifest was generated by read-only Mach-O parsing. Signing/package metadata
+remains limited to the same seven registered devices. The final log is
+`build/logs/ios-app-build-tpm-input-signed.log`; no debugger, simulator, VM or
+test was executed. Physical keyboard connection now leaves actual F1–F12 in
+an onscreen row and hides the remaining software keyboard. RAM accepts any
+whole MiB value within the 4096 MiB minimum, physical headroom and board-map
+bounds, with exact reservation matching on startup. These are source/build
+results, not device validation.
 
 No tested iPad/iPadOS runtime matrix exists. Memory admission is conservative
 policy, not proof that a model can boot Windows or avoid process termination.

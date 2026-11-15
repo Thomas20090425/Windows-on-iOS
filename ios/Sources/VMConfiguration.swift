@@ -66,7 +66,8 @@ struct VMConfiguration: Codable, Equatable {
               name.count <= 100 else { throw VMLibraryError.invalidName }
         let noForward = tcpForwardHostPort == 0 && tcpForwardGuestPort == 0
         let validForward = (1024...65535).contains(tcpForwardHostPort) && (1...65535).contains(tcpForwardGuestPort)
-        guard (1...4).contains(cpuCount), [4096, 4352, 4608].contains(memoryMB),
+        let memoryMapLimitMB: UInt64 = (0x4010000000 - 0x40000000) >> 20
+        guard (1...4).contains(cpuCount), (4096...memoryMapLimitMB).contains(memoryMB),
               [30, 60, 120].contains(displayRefreshRate), pointerSensitivity.isFinite,
               (0.25...3).contains(pointerSensitivity), (64...512).contains(diskSizeGiB),
               installationISO == nil || installationISO == "installer.iso", installationISO == nil || !primaryDiskReadOnly,

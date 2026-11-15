@@ -23,6 +23,18 @@ was advancing slowly, projecting 22.2 minutes at that measured rate.
   held-input cleanup, Pencil pointer/hover, host pinch zoom/pan.
 - Runtime capability admission, selected RAM reservation before iPad JIT,
   conservative host headroom and explicit rejection of unsupported phones.
+- Added libtpms-backed software TPM 2.0 with a genuine firmware FIFO frontend,
+  Windows ACPI CRB frontend, per-VM persistent identity/NV state and fail-closed
+  state loading. OpenSSL/libtpms are pinned, cross-compiled and bundled with
+  notices; no external TPM driver or user firmware import is needed.
+- Replaced the RAM presets with whole-MiB numeric entry, removing the 4.5 GiB
+  cap and 256 MiB step. Native/JIT reservation uses the exact requested amount
+  within physical memory minus 3 GiB host headroom and the board memory map.
+- Added actual F1–F12 buttons and physical-keyboard detection. A connected
+  keyboard hides the full onscreen keyboard; Duo uses the display plus F row.
+  Mouse state now includes direct GCMouse button edges and passive UIKit
+  mouse/trackpad observation before UIView gesture cancellation, preserving
+  external holds across hover, wheel and delayed synthetic-tap releases.
 - Disk extraction keeps existing writable images and source archives; unsafe
   process-global engine recreation is blocked until app relaunch.
 - UTM-referenced system/storage/network/audio/display/input configuration;
@@ -111,15 +123,21 @@ was advancing slowly, projecting 22.2 minutes at that measured rate.
   exact-PID attach, stopped-state verification and a 60 s startup watchdog.
   Python/shell syntax compilation and independent source review passed. No app
   rebuild, debugger/device execution or runtime tests were performed.
+- Final software TPM/input **signed Release build succeeded** with two build
+  workers. App/IPA and updated manifest are in `distribution/`; log:
+  `build/logs/ios-app-build-tpm-input-signed.log`. Real TPM symbols and bundled
+  notices/provenance were inspected, and the local launch-symbol manifest was
+  regenerated from the new Mach-O. No tests, debugger, simulator, device tunnel
+  or VM execution. Device TPM enrollment/input/RAM behavior remain unverified.
 
 ## Remaining external/runtime work
 
 - Install on an appropriately provisioned iPad; verify the JIT trap protocol,
   actual memory behavior, UEFI/Windows boot, physical input and guest I/O.
 - No suitable iPad/Duo was available. No Windows media was supplied locally.
-- ISO boot/unattended setup remains unverified. No virtual TPM is implemented;
-  Windows Setup may reject the platform. No requirement bypass or fabricated
-  successful installation was added.
+- ISO boot/unattended setup and the new software TPM's firmware/Windows handoff
+  remain unverified. Windows Setup may reject other platform requirements.
+  No requirement bypass or fabricated successful installation was added.
 - Pencil pressure/tilt/eraser/Windows Ink digitizer support, complete VM teardown,
   suspend/snapshots, dynamic guest resolution and accelerated guest graphics
   remain unavailable. No speedup or universal iPad compatibility is claimed.
