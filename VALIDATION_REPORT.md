@@ -32,7 +32,7 @@ they do not validate the subsequently added app/device changes.
 | New input/UI/config/lifecycle/storage tests | **NOT RUN — USER REQUEST** | Source and build checks only; no runtime assertions claimed. |
 | JIT helper correction and VM deletion | **COMPILED; NOT RUNTIME-TESTED** | Release/Debug compile; exported readiness word and exact assembly trap labels are present in the packaged Mach-O. Python/JavaScript helper syntax checks passed. No helper attachment or user VM deletion executed. |
 | Local symbols for device launcher | **METADATA PREPARED; NOT DEVICE-TESTED** | `build/jit-symbols-release.json` and `build/jit-symbols-debug.json` record Mach-O UUIDs/addresses from the local products, including the Debug dylib. Python/shell syntax compilation passed. No LLDB process was launched during this correction. |
-| JIT preparation transport | **USER-OBSERVED BASELINE; NEW PATH UNTIMED** | User log reports 21 MiB of full-region preparation after 72.9 s, about 0.288 MiB/s or a linear projection of 22.2 minutes for 384 MiB. Default changed to acknowledged one-byte-per-16-KiB-page raw debugger packets. No elapsed-time result exists yet for the new path. |
+| JIT preparation transport | **BOTH MAC PATHS USER-TIMED; TOO SLOW ON THIS CONNECTION** | Bulk: 21 MiB/72.9 s projects 22.2 minutes. Serial sparse: 316/24,576 pages in 24.4 s projects about 31.6 minutes. Smaller payload did not overcome per-command cost. Neither log reaches completed JIT preparation. StikDebug's batched path remains device-unverified for this app. |
 | Simulator UI checks | **NOT RUN — USER REQUEST** | Simulator compilation/execution is not native JIT verification. |
 | Physical installation | **USER-REPORTED LAUNCH; NOT AGENT-TESTED** | User supplied devicectl output showing bundle `me.ammaar.windowsios` launched on device with PID 2377. Its precise build UUID was not logged. No installation or device launch executed by the agent. |
 | Device JIT initialization | **PARTIAL USER-REPORTED EVIDENCE** | Latest supplied log shows helper readiness write/read-back, successful probe reply and allocation of 384 MiB RX memory at `0x1045e8000`. It does not show completed page preparation, RX execution self-check or helper detach. No debugger attachment performed by the agent. |
@@ -133,6 +133,18 @@ The log does not identify the previously negotiated packet size, so it cannot
 prove that a particular packet budget, network type or Mac CPU caused the
 baseline. Python syntax compilation and source/protocol review passed; no
 debugger or device/VM run was executed by the agent to measure the new path.
+
+The user subsequently timed the serial sparse path: 316 pages after 24.4 s,
+with the helper reporting an observed ETA of 31.2 minutes remaining. It was
+slower than the bulk baseline on this connection. Reduced payload alone is not
+a successful performance optimization here. StikDebug's native preparation
+sends 128 page commands before reading their responses, addressing the serial
+request/response cost; this source-based inference is not a measured WindowsiOS
+speed guarantee. The existing app's custom-script URL handoff was checked
+against current official StikDebug source: both schemes are registered,
+URL-safe Base64 is decoded, PID-targeted custom scripts are accepted, and the
+app supplies the handshake script automatically. No new app source or runtime
+validation was performed for that review.
 
 VM deletion now has sidebar swipe/context and detail actions, named confirmation,
 strict library-directory/symlink validation, background removal and a native

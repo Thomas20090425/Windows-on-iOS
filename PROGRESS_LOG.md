@@ -87,6 +87,11 @@ was advancing slowly, projecting 22.2 minutes at that measured rate.
 - The sparse transport change passed Python syntax compilation and static
   protocol review. The baseline timing came from the user's device log; the
   new preparation path still needs a device timing/functional result.
+- Subsequent user timing disproved a speed improvement for the serial sparse
+  Mac path on this connection: 316 pages/24.4 s projected over 30 minutes.
+  Investigated StikDebug's 128-command batching and verified the app's existing
+  custom-script URL handoff against official source. Recommended evaluating
+  that path; no completion-time or Windows-boot claim and no agent runtime run.
 
 ## Remaining external/runtime work
 

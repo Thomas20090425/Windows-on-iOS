@@ -130,6 +130,19 @@ rejects Xcode-managed profiles when forced into manual signing mode.
    normal Xcode session before using StikDebug. If StikDebug cannot open, the
    app reports that and points to the Mac helper.
 
+   **Measured Mac transport limitation:** this user's connection took 24.4 s
+   for only 316 serial page commands, projecting over 30 minutes. The sparse
+   Mac loop is therefore not a demonstrated startup improvement on that
+   connection. StikDebug is the more appropriate next path to evaluate: its
+   native preparation batches 128 commands before reading responses. Configure
+   the latest [official StikDebug release](https://github.com/StikDebug/StikDebug/releases/latest)
+   with its pairing file and LocalDevVPN first; then use WindowsiOS's **Enable
+   JIT on Device**, confirm **Enable and Run Script** if prompted, return to
+   WindowsiOS and tap Start. WindowsiOS passes its matching custom script
+   automatically. Stop the Mac debugger and fully close/reopen WindowsiOS
+   before switching helpers. This path's completion time and guest boot still
+   require device verification.
+
 7. The helper launches the app stopped and attaches to the **iPad process**.
    Select the machine and tap **Start Windows** on the iPad while the helper is
    active. iPad JIT allocation waits until this selection, so the reservation
