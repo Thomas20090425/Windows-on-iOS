@@ -12,6 +12,22 @@
 
 </div>
 
+## Current universal app build
+
+The 2026-11-15 build adds a native iPad VM Library/session, hardware input,
+Apple Pencil pointer input, host zoom and UTM-informed configuration while
+retaining the original Duo presentation and ARM64 engine. The device app and
+development IPA compile and sign successfully. **This update is build-verified
+only: iPad JIT, Windows boot and physical input have not been tested.**
+The showcase and performance claims below describe the upstream repository;
+they were not reproduced during this work.
+
+Use `JOBS=2 ./scripts/build_ios_app.sh` for a compile-only build. Add your
+`DEVELOPMENT_TEAM` for development signing. Outputs are in `distribution/`.
+See [iPad installation](IPAD_INSTALLATION.md), [verification evidence](VALIDATION_REPORT.md),
+[UTM configuration mapping](docs/UTM_CONFIGURATION_REVIEW.md), and
+[progress log](PROGRESS_LOG.md). Pencil pressure/tilt/eraser are not implemented.
+
 ---
 
 ## Visual Showcase
@@ -159,9 +175,9 @@ Windows 11 24H2 refuses FDT/DeviceTree boot and demands a compliant ServerReady/
   - Full CORB/RIRB verb ring engines, 24.000 MHz `WALCLK`, DMA Position Buffer (`DPLBASE`/`DPUBASE`), `LPIB`, and scatter-gather BDL streams.
 - Windows 11 binds inbox `hdaudbus.sys` + `HdAudio.sys` automatically on first boot, streaming lock-free 48 kHz S16LE playback to iOS `RemoteIO` (`AudioUnit`) and live microphone capture from iOS `AudioQueueNewInput` (`AVAudioSessionCategoryPlayAndRecord`).
 
-### 6. 384 MiB TXM Dual-Mapped JIT + 4.5 GB Ledger-Exempt RAM + Featherweight Windows 11 ([`ios/Sources/Native/winios_jit.c`](ios/Sources/Native/winios_jit.c), [`tools/opt_hive_arm64.c`](tools/opt_hive_arm64.c), [`scripts/optimize_windows_lite.py`](scripts/optimize_windows_lite.py))
+### 6. 384 MiB TXM Dual-Mapped JIT + Configured Guest RAM ([`ios/Sources/Native/winios_jit.c`](ios/Sources/Native/winios_jit.c), [`scripts/optimize_windows_lite.py`](scripts/optimize_windows_lite.py))
 - **TXM Low-VA Reservation & Ledger-Exempt RAM:** On iOS 26/27 TXM devices, executable JIT mappings placed above `0x7000000000` hang in hardware. `winios_jit.c` reserves a static zero-fill region in `__DATA` below `0x180000000` at Mach-O load time, releases it right before `debugserver` `_M<size>,rx` allocation to claim a **384 MiB RX/RW dual-mapped JIT**, and uses `mach_make_memory_entry_64` + `mach_memory_entry_ownership(..., LEDGER_NO_FOOTPRINT)` (`hv_alloc_no_footprint`) while `CS_DEBUGGED` is active to pre-allocate **4,608 MiB (4.5 GB) of Jetsam-exempt Guest RAM** before LLDB detaches — leaving **~2–3 GB of free iOS Jetsam headroom**.
-- **Featherweight Offline Hive Surgery (`1.46 GB` Idle RAM):** Using an offline WinPE environment plus a custom freestanding ARM64 Win32 tool (`tools/opt_hive_arm64.c`, opening `SYSTEM`/`SOFTWARE` hives with `SeBackupPrivilege` + `SeRestorePrivilege` + `REG_OPTION_BACKUP_RESTORE` to bypass `TrustedInstaller` DACLs cleanly), `optimize_windows_lite.py` strips 35+ background UWP/telemetry/Defender/indexer hogs and KVA Shadow overhead — bringing Windows 11 24H2 idle desktop memory down to **`1.46 GB / 4.5 GB` (`~31.7%`)** and **`89%` WFI idle** across 4 A20 Pro performance-core vCPUs, packed into a compact `hvsparse` block image (`host/hvsparse.c`).
+- **Current Windows cleanup:** Optional consumer-app and visual cleanup preserves Defender, SmartScreen, Windows Update, code integrity and CPU mitigations. It no longer invokes the legacy security-disabling hive helper. No idle-RAM or performance result has been measured for this revised profile. iPad RAM admission and debugger reservation remain subject to physical-device verification.
 
 ### 7. Foldable iPhone Duo Surface Laptop Ultra UI + Native iOS `SafariSheet` OAuth Bridge ([`ios/Sources/`](ios/Sources/), [`tools/winios_browser_arm64.c`](tools/winios_browser_arm64.c))
 - **Posture-Aware Foldable UI:** Hooks iOS 27's `UIHingeInteraction` (`HingeSensorView.swift`) on the foldable iPhone Duo to transition fluidly between:
@@ -200,7 +216,7 @@ Windows 11 24H2 refuses FDT/DeviceTree boot and demands a compliant ServerReady/
 
 ## Building, Provisioning & Deploying
 
-> **Note:** No disk images (`*.img`, `*.hvsparse`), UEFI firmware binaries (`*.fd`), or Windows/driver ISOs (`*.esd`, `*.iso`, `*.exe`) are stored in git. All large artifacts live exclusively inside `work/` and `build/` (enforced by [`.gitignore`](.gitignore)).
+> **Note:** No disk images (`*.img`, `*.hvsparse`), UEFI firmware binaries (`*.fd`), or Windows/driver ISOs (`*.esd`, `*.iso`, `*.exe`) are stored in git. Local media/build artifacts live in ignored `work/`, `build/`, `ios/deps/` and `distribution/` directories.
 
 ### Prerequisites
 - macOS on Apple Silicon (`M1` or newer; developed on M5 Pro) with Xcode, `xcodegen`, `meson`, `ninja`, `pkg-config`, `libslirp`, `llvm`/`lld` (for compiling freestanding `AArch64` Win32 guest helpers), and Python 3.
@@ -215,12 +231,13 @@ Windows 11 24H2 refuses FDT/DeviceTree boot and demands a compliant ServerReady/
 make -j8 all ios-lib test-core
 ```
 
-### 2. Provision & Optimize Featherweight Windows 11 24H2 ARM64 Image
+### 2. Provision Windows 11 24H2 ARM64 Image (Requires a Capable Host)
 ```bash
 # Unattended WinPE DISM + NetKVM injection + BCDBOOT UEFI NVRAM provisioning -> work/windows11.img + work/vars.fd
 /opt/homebrew/bin/python3 scripts/provision_windows_arm64.py
 
-# Offline WinPE DISM bloat removal + SeRestorePrivilege registry hive surgery -> work/windows11_lite.img (1.46 GB idle RAM)
+# Optional offline consumer-app and visual cleanup; preserves security defaults.
+# Refuses to overwrite an existing work/windows11_lite.img. Runs a VM separately from app compilation.
 /opt/homebrew/bin/python3 scripts/optimize_windows_lite.py
 
 # Pack into fast zero-skipping sparse container for iOS transfer -> work/windows11.hvsparse
