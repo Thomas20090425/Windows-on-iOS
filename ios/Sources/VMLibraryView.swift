@@ -9,8 +9,10 @@ final class VMLibraryStore: ObservableObject {
     @Published var machines: [VMMachine] = []
     @Published var errorMessage: String?
     @Published var isImporting = false
+    @Published var isDeleting = false
     @Published var importStatus = "Copying media… Keep WindowsiOS open."
     let files: VMLibraryFiles
+    var isBusy: Bool { isImporting || isDeleting }
 
     init() {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -23,6 +25,7 @@ final class VMLibraryStore: ObservableObject {
     }
 
     func create(name: String) -> VMMachine? {
+        guard !isBusy else { return nil }
         do {
             let machine = try files.create(name: name)
             refresh()
@@ -31,7 +34,7 @@ final class VMLibraryStore: ObservableObject {
     }
 
     func createFromISO(name: String, diskSizeGiB: Int, iso: URL, completion: @escaping (String?) -> Void) {
-        guard !isImporting else { return }
+        guard !isBusy else { return }
         isImporting = true
         importStatus = "Importing the Windows ISO and creating your virtual disk… Keep WindowsiOS open."
         let files = self.files
@@ -52,12 +55,13 @@ final class VMLibraryStore: ObservableObject {
     }
 
     func save(_ configuration: VMConfiguration, machine: VMMachine) {
+        guard !isBusy else { return }
         do { try files.save(configuration, in: machine.directory); refresh() }
         catch { errorMessage = error.localizedDescription }
     }
 
     func importMedia(url: URL, kind: VMMediaKind, machine: VMMachine) {
-        guard !isImporting else { return }
+        guard !isBusy else { return }
         isImporting = true
         importStatus = "Copying media… Keep WindowsiOS open."
         let files = self.files
@@ -73,6 +77,30 @@ final class VMLibraryStore: ObservableObject {
             refresh()
         }
     }
+
+    func delete(_ machine: VMMachine, completion: @escaping (Bool) -> Void) {
+        guard !isBusy else { completion(false); return }
+        // Recheck native ownership after confirmation, including stopped VMs
+        // whose engine still owns disk handles until the app is relaunched.
+        guard WinIOSBridge.shared.beginDeletingMachineDirectory(machine.directory.path) else {
+            errorMessage = VMLibraryError.machineInUse.localizedDescription
+            completion(false)
+            return
+        }
+        isDeleting = true
+        let files = self.files
+        Task {
+            let failure = await Task.detached(priority: .utility) { () -> String? in
+                do { try files.deleteMachine(at: machine.directory); return nil }
+                catch { return error.localizedDescription }
+            }.value
+            WinIOSBridge.shared.finishDeletingMachineDirectory(machine.directory.path)
+            isDeleting = false
+            if let failure { errorMessage = failure }
+            refresh()
+            completion(failure == nil)
+        }
+    }
 }
 
 struct VMLibraryView: View {
@@ -84,6 +112,7 @@ struct VMLibraryView: View {
     @State private var importing = false
     @State private var showSession = false
     @State private var activeMachineID: String?
+    @State private var machineToDelete: VMMachine?
 
     private var selected: VMMachine? { library.machines.first { $0.id == selectedID } }
 
@@ -99,6 +128,14 @@ struct VMLibraryView: View {
                         }
                     } icon: { Image(systemName: "desktopcomputer") }
                     .tag(machine.id)
+                    .contextMenu {
+                        Button("Delete Virtual Machine…", systemImage: "trash", role: .destructive) { machineToDelete = machine }
+                            .disabled(!canDelete(machine))
+                    }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button("Delete", systemImage: "trash", role: .destructive) { machineToDelete = machine }
+                            .disabled(!canDelete(machine))
+                    }
                 }
             }
             .navigationTitle("Virtual Machines")
@@ -110,7 +147,7 @@ struct VMLibraryView: View {
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button("New Machine", systemImage: "plus") { creatingMachine = true }
-                        .disabled(library.isImporting || vm.isVMRunning || vm.isUnpacking)
+                        .disabled(library.isBusy || vm.isVMRunning || vm.isUnpacking)
                 }
                 ToolbarItem(placement: .secondaryAction) {
                     Button("Refresh", systemImage: "arrow.clockwise") { library.refresh() }
@@ -129,6 +166,10 @@ struct VMLibraryView: View {
                     .padding(24).frame(maxWidth: 420)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
                     .padding()
+            } else if library.isDeleting {
+                ProgressView("Deleting virtual machine…")
+                    .padding(24)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
             }
         }
         .task { library.refresh(); selectedID = library.machines.first?.id }
@@ -142,6 +183,12 @@ struct VMLibraryView: View {
         .alert("Virtual machine", isPresented: Binding(get: { library.errorMessage != nil }, set: { if !$0 { library.errorMessage = nil } })) {
             Button("OK") { library.errorMessage = nil }
         } message: { Text(library.errorMessage ?? "") }
+        .alert("Delete virtual machine?", isPresented: Binding(get: { machineToDelete != nil }, set: { if !$0 { machineToDelete = nil } }), presenting: machineToDelete) { machine in
+            Button("Delete", role: .destructive) { deleteConfirmed(machine) }
+            Button("Cancel", role: .cancel) { machineToDelete = nil }
+        } message: { machine in
+            Text("Delete “\(machine.configuration.name)” permanently? Its virtual disks, imported ISO copy, firmware variables and configuration will be removed. Your original ISO and other machines are kept.")
+        }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.data], allowsMultipleSelection: false) { result in
             guard let selected else { return }
             switch result {
@@ -179,7 +226,7 @@ struct VMLibraryView: View {
             }
             Section("Windows session") {
                 Button(vm.isVMRunning ? "Return to Windows" : "Start Windows", systemImage: "play.fill") { launch(machine) }
-                    .disabled(!machine.isReady || library.isImporting || vm.isUnpacking || (vm.isVMRunning && activeMachineID != machine.id))
+                    .disabled(!machine.isReady || library.isBusy || vm.isUnpacking || (vm.isVMRunning && activeMachineID != machine.id))
                 if vm.isVMRunning && activeMachineID != machine.id {
                     Text("Another machine is running. Select that machine to return to its session.").font(.caption).foregroundStyle(.secondary)
                 }
@@ -187,7 +234,9 @@ struct VMLibraryView: View {
                 Text(vm.jitStatusText).font(.caption).foregroundStyle(.secondary)
                 Text(WinIOSBridge.shared.runtimeCapabilityText).font(.caption).foregroundStyle(.secondary)
                 if !vm.isJITLive {
-                    Text("Launch with the supplied Mac debugger script. No iPad model has been verified by this build alone.")
+                    Button("Enable JIT on Device", systemImage: "bolt.fill") { vm.requestStikDebugJIT() }
+                        .disabled(library.isBusy || vm.isUnpacking)
+                    Text("Use StikDebug or the supplied Mac JIT helper. Xcode Run alone cannot initialize JIT. No iPad model has been verified by this build alone.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -201,7 +250,7 @@ struct VMLibraryView: View {
                 DisclosureGroup("Advanced disk import") {
                     ForEach(machine.hasInstallerISO ? [] : VMMediaKind.allCases) { kind in
                         Button(kind.title, systemImage: "square.and.arrow.down") { importKind = kind; importing = true }
-                            .disabled(vm.isVMRunning || vm.isUnpacking || library.isImporting)
+                            .disabled(vm.isVMRunning || vm.isUnpacking || library.isBusy)
                     }
                     Text(machine.hasInstallerISO ? "Automatic setup manages this machine's disks. Create a separate machine to install from another ISO." : "For existing installations only. Existing disks are never replaced; create a separate machine to install from another ISO.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -211,18 +260,28 @@ struct VMLibraryView: View {
                 library.machines.first(where: { $0.id == machine.id })?.configuration ?? machine.configuration
             }, set: { library.save($0, machine: machine) }))
             .id(machine.id)
-            .disabled(vm.isVMRunning || vm.isUnpacking || library.isImporting)
+            .disabled(vm.isVMRunning || vm.isUnpacking || library.isBusy)
             Section("Storage and setup") {
                 Text("The virtual disk grows as Windows writes data, up to its selected capacity. Keep sufficient free iPad storage for installation and updates. Manage or export machines through Files → On My iPad → WindowsiOS → Machines after shutting down Windows.")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("Close Windows normally before managing its files. Returning to the library leaves the current session running. After Windows stops, close and relaunch WindowsiOS before starting another session or switching machines.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section {
+                Button("Delete Virtual Machine…", systemImage: "trash", role: .destructive) { machineToDelete = machine }
+                    .disabled(!canDelete(machine))
+                if !WinIOSBridge.shared.canDeleteMachineDirectory(machine.directory.path) {
+                    Text("This machine is still in use. Stop Windows and relaunch WindowsiOS to release its files before deleting it.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
         }
         .navigationTitle("Machine")
     }
 
     private func launch(_ machine: VMMachine) {
+        guard !library.isBusy, !vm.isUnpacking else { return }
+        guard !library.isBusy else { return }
         if vm.isVMRunning {
             guard activeMachineID == machine.id else { return }
             showSession = true
@@ -243,6 +302,21 @@ struct VMLibraryView: View {
         activeMachineID = machine.id
         vm.startOrRetry()
         showSession = true
+    }
+
+    private func canDelete(_ machine: VMMachine) -> Bool {
+        !library.isBusy && !vm.isUnpacking && !(vm.isVMRunning && activeMachineID == machine.id) &&
+            WinIOSBridge.shared.canDeleteMachineDirectory(machine.directory.path)
+    }
+
+    private func deleteConfirmed(_ machine: VMMachine) {
+        machineToDelete = nil
+        guard canDelete(machine) else { return }
+        library.delete(machine) { deleted in
+            guard deleted else { return }
+            if activeMachineID == machine.id { activeMachineID = nil }
+            if selectedID == machine.id { selectedID = library.machines.first?.id }
+        }
     }
 }
 

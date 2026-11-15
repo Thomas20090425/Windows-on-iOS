@@ -125,72 +125,25 @@ def main():
     process = target.GetProcess()
     print(f"[duo] Attached to PID {process.GetProcessID()} (state={process.GetState()})", flush=True)
 
-    detached = False
-    for step in range(1, 64):
-        process.Continue()
-        state = process.GetState()
-        if state != lldb.eStateStopped:
-            raise RuntimeError(f"Process entered unexpected state {state} at step {step}")
-
-        thread = find_stopped_thread(process)
-        frame = thread.GetFrameAtIndex(0)
-        pc = frame.FindRegister("pc").GetValueAsUnsigned()
-        x0 = frame.FindRegister("x0").GetValueAsUnsigned()
-        x1 = frame.FindRegister("x1").GetValueAsUnsigned()
-        x16 = frame.FindRegister("x16").GetValueAsUnsigned()
-
-        err = lldb.SBError()
-        raw = process.ReadMemory(pc, 4, err)
-        if not err.Success() or len(raw) != 4:
-            print(f"[duo] Stop #{step}: pc={pc:#x} (could not read insn: {err.GetCString()}); continuing", flush=True)
-            continue
-
-        insn = struct.unpack("<I", raw)[0]
-        if (insn & 0xFFE0001F) != 0xD4200000:
-            desc = thread.GetStopDescription(128)
-            print(f"[duo] Stop #{step}: non-BRK stop at pc={pc:#x} insn={insn:#010x} ({desc}); continuing", flush=True)
-            continue
-
-        imm = (insn >> 5) & 0xFFFF
-        print(f"[duo] Stop #{step}: BRK #{imm:#x} at pc={pc:#x} (x0={x0:#x}, x1={x1:#x}, x16={x16:#x})", flush=True)
-
-        if imm == 0x69:
-            frame.FindRegister("x0").SetValueFromCString("0xE0000069")
-            frame.FindRegister("pc").SetValueFromCString(hex(pc + 4))
-            print("[txm-jit] Answered probe BRK #0x69 -> x0 = 0xE0000069", flush=True)
-        elif imm == 0xF00D:
-            if x16 == 1:
-                rx_addr = x0
-                if rx_addr == 0:
-                    pkt_out = run_cmd(debugger, f"process plugin packet send _M{x1:x},rx")
-                    m = re.search(r"response:\s*([0-9a-fA-F]+)", pkt_out)
-                    if not m:
-                        raise RuntimeError(f"Unexpected _M packet response: {pkt_out}")
-                    rx_addr = int(m.group(1), 16)
-                    print(f"[txm-jit] Allocated {x1 >> 20} MiB RX region at {rx_addr:#x}", flush=True)
-                bless_txm_region(debugger, process, rx_addr, x1)
-                frame.FindRegister("x0").SetValueFromCString(hex(rx_addr))
-                frame.FindRegister("pc").SetValueFromCString(hex(pc + 4))
-            elif x16 == 0:
-                frame.FindRegister("pc").SetValueFromCString(hex(pc + 4))
-                print("[txm-jit] Servicing CMD_DETACH -> detaching LLDB cleanly!", flush=True)
-                err = process.Detach()
-                if not err.Success():
-                    raise RuntimeError(f"Detach failed: {err.GetCString()}")
-                detached = True
-                break
-            else:
-                print(f"[txm-jit] Unknown BRK #0xf00d command x16={x16:#x}; skipping", flush=True)
-                frame.FindRegister("pc").SetValueFromCString(hex(pc + 4))
-        else:
-            print(f"[duo] Unhandled BRK #{imm:#x}; advancing pc+4", flush=True)
-            frame.FindRegister("pc").SetValueFromCString(hex(pc + 4))
-
-    lldb.SBDebugger.Destroy(debugger)
-    lldb.SBDebugger.Terminate()
-    if not detached:
-        raise RuntimeError("Exited loop without seeing CMD_DETACH")
-    print("[duo] SUCCESS: TXM JIT + Ledger-Exempt Guest RAM active and debugger detached!", flush=True)
+    # Use the same strict handshake/trap policy as the universal device launcher.
+    # Keeping a duplicate BRK loop here previously allowed unrelated traps to
+    # be skipped and would bypass the helper-readiness check in newer apps.
+    from _lldb_txm_jit import txm_jit_cmd
+    try:
+        txm_jit_cmd(debugger, "", None, None, {})
+    except Exception:
+        if process.GetState() == lldb.eStateStopped:
+            # The standalone Python process is about to exit; explicitly keep
+            # the remote process stopped instead of allowing debugger teardown
+            # to resume an unhandled exception.
+            error = process.Detach(True)
+            if not error.Success():
+                print(f"[duo] Could not detach while keeping the process stopped: {error.GetCString()}", flush=True)
+        raise
+    finally:
+        lldb.SBDebugger.Destroy(debugger)
+        lldb.SBDebugger.Terminate()
+    print("[duo] JIT helper completed and detached", flush=True)
 
 
 if __name__ == "__main__":

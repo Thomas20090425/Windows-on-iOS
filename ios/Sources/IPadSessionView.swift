@@ -162,9 +162,13 @@ struct IPadSessionView: View {
             Text(vm.jitStatusText).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
             if vm.isUnpacking { ProgressView(value: vm.unpackProgress) }
             if !vm.isUnpacking {
+                if !vm.isJITLive {
+                    Button("Enable JIT on Device", systemImage: "bolt.fill") { vm.requestStikDebugJIT() }
+                        .buttonStyle(.bordered)
+                }
                 Button("Retry Start", systemImage: "play.fill") { vm.startOrRetry() }
                     .buttonStyle(.borderedProminent)
-                Text("Use the supplied Mac launch script to initialize JIT before starting Windows.")
+                Text("Use StikDebug or the Mac JIT launch helper before starting Windows. Xcode Run alone cannot initialize JIT.")
                     .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
             }
         }

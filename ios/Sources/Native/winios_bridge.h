@@ -13,6 +13,7 @@ typedef void (^WinIOSStateCallback)(void);
 
 @property (nonatomic, readonly) BOOL isJITLive;
 @property (nonatomic, readonly) BOOL isDebuggerAttached;
+@property (nonatomic, readonly) uint64_t jitHelperTokenAddress;
 @property (nonatomic, readonly) BOOL isVMRunning;
 @property (nonatomic, readonly) BOOL isUnpacking;
 @property (nonatomic, readonly) double unpackProgress;
@@ -38,6 +39,9 @@ typedef void (^WinIOSStateCallback)(void);
 - (BOOL)tryAcquireJIT:(BOOL)detachAfter;
 
 - (BOOL)hasProvisionedMachine;
+- (BOOL)canDeleteMachineDirectory:(NSString *)directory;
+- (BOOL)beginDeletingMachineDirectory:(NSString *)directory;
+- (void)finishDeletingMachineDirectory:(NSString *)directory;
 - (BOOL)configureMachineDirectory:(NSString *)directory memoryMB:(uint64_t)memoryMB cpuCount:(NSInteger)cpuCount networkEnabled:(BOOL)networkEnabled audioEnabled:(BOOL)audioEnabled;
 - (BOOL)configureRuntimeOptions:(NSDictionary<NSString *, NSNumber *> *)options;
 - (BOOL)needsSparseUnpack;

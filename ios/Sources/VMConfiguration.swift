@@ -108,6 +108,7 @@ enum VMMediaKind: String, CaseIterable, Identifiable {
 enum VMLibraryError: LocalizedError {
     case invalidName, invalidConfiguration, invalidMedia(String), alreadyExists(String), invalidDirectory
     case missingBundledFirmware, insufficientStorage(required: Int64, available: Int64), cannotCreateDisk
+    case machineInUse
     var errorDescription: String? {
         switch self {
         case .invalidName: return "Enter a machine name between 1 and 100 characters."
@@ -121,6 +122,7 @@ enum VMLibraryError: LocalizedError {
             formatter.countStyle = .file
             return "Windows setup needs at least \(formatter.string(fromByteCount: required)) free for the ISO copy and installation headroom. Available: \(formatter.string(fromByteCount: available))."
         case .cannotCreateDisk: return "The app could not create the Windows virtual disk. Check available iPad storage."
+        case .machineInUse: return "This machine is still in use. Stop Windows and close and relaunch WindowsiOS before deleting it."
         }
     }
 }
@@ -160,11 +162,20 @@ struct VMLibraryFiles {
         try validateDirectory(directory)
         let configURL = directory.appendingPathComponent(configurationName)
         let configuration: VMConfiguration
+        var configurationIssue: String?
         if manager.fileExists(atPath: configURL.path) {
-            configuration = try JSONDecoder().decode(VMConfiguration.self, from: Data(contentsOf: configURL)).validated()
+            do {
+                configuration = try JSONDecoder().decode(VMConfiguration.self, from: Data(contentsOf: configURL)).validated()
+            } catch {
+                // Keep damaged configurations visible so the owner can delete
+                // an old VM instead of making the whole library inaccessible.
+                configuration = VMConfiguration(name: directory.lastPathComponent)
+                configurationIssue = "configuration.json could not be read: \(error.localizedDescription)"
+            }
         } else { configuration = VMConfiguration(name: directory.lastPathComponent == "Win11" ? "Windows 11 ARM64" : directory.lastPathComponent) }
         let names = try manager.contentsOfDirectory(atPath: directory.path)
         var missing = [String]()
+        if let configurationIssue { missing.append(configurationIssue) }
         if !names.contains("code.fd") && VMBundledFirmware.codeURL == nil { missing.append("bundled UEFI firmware") }
         if !names.contains("vars.fd") { missing.append("automatic firmware initialization") }
         if !names.contains("windows11.img") && !names.contains("windows11.hvsparse") { missing.append("windows11.img or windows11.hvsparse") }
@@ -174,6 +185,31 @@ struct VMLibraryFiles {
             stored += Int64((try? file.resourceValues(forKeys: [.fileAllocatedSizeKey]).fileAllocatedSize) ?? 0)
         }
         return VMMachine(directory: directory, configuration: configuration, storedBytes: stored, missingFiles: missing, hasSecondaryDisk: names.contains("secondary.img"), hasInstallerISO: names.contains("installer.iso"))
+    }
+
+    /// Deletes only a real, direct child of this library. Symlinked roots and
+    /// machine directories are never followed; original imports live elsewhere.
+    func deleteMachine(at directory: URL) throws {
+        let library = root.standardizedFileURL
+        let target = directory.standardizedFileURL
+        guard library.isFileURL, target.isFileURL,
+              !target.lastPathComponent.hasPrefix("."),
+              target.deletingLastPathComponent() == library else {
+            throw VMLibraryError.invalidDirectory
+        }
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey]
+        let libraryValues = try library.resourceValues(forKeys: keys)
+        let targetValues = try target.resourceValues(forKeys: keys)
+        guard libraryValues.isDirectory == true, libraryValues.isSymbolicLink != true,
+              targetValues.isDirectory == true, targetValues.isSymbolicLink != true else {
+            throw VMLibraryError.invalidDirectory
+        }
+        let canonicalLibrary = library.resolvingSymlinksInPath()
+        let canonicalTarget = target.resolvingSymlinksInPath()
+        guard canonicalTarget.deletingLastPathComponent() == canonicalLibrary else {
+            throw VMLibraryError.invalidDirectory
+        }
+        try manager.removeItem(at: target)
     }
 
     /// Copy into a private staging path and rename only after complete validation. Never replace media.

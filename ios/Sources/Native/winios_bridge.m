@@ -34,6 +34,7 @@ static WinIOSBridge *s_shared_bridge = nil;
     BOOL _networkEnabled;
     BOOL _audioEnabled;
     BOOL _hasCreatedVM;
+    NSString *_deletingMachineDirectory;
     BOOL _primaryDiskReadOnly;
     BOOL _sharedFolderEnabled;
     BOOL _microphoneEnabled;
@@ -219,6 +220,41 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     return winios_jit_is_debugger_attached();
 }
 
+- (uint64_t)jitHelperTokenAddress {
+    return winios_jit_helper_token_address();
+}
+
+- (BOOL)canDeleteMachineDirectory:(NSString *)directory {
+    if (_deletingMachineDirectory) return NO;
+    NSString *canonical = directory.stringByStandardizingPath.stringByResolvingSymlinksInPath;
+    NSString *machines = [[[self documentsPath] stringByAppendingPathComponent:@"Machines"] stringByResolvingSymlinksInPath];
+    if (![[canonical stringByDeletingLastPathComponent] isEqualToString:machines]) return NO;
+    if (_unpacking) return NO;
+    /* Stopped/failed engines still retain process-global mappings and open
+     * disk handles. Permit other machines, but protect the retained directory
+     * until process relaunch supplies a real lifetime boundary. */
+    if (_hasCreatedVM || _vmRunning) {
+        NSString *owned = [self machineDirectory].stringByStandardizingPath.stringByResolvingSymlinksInPath;
+        if ([canonical isEqualToString:owned]) return NO;
+    }
+    return YES;
+}
+
+- (BOOL)beginDeletingMachineDirectory:(NSString *)directory {
+    if (![self canDeleteMachineDirectory:directory]) return NO;
+    _deletingMachineDirectory = directory.stringByStandardizingPath.stringByResolvingSymlinksInPath;
+    [self notifyChanged];
+    return YES;
+}
+
+- (void)finishDeletingMachineDirectory:(NSString *)directory {
+    NSString *canonical = directory.stringByStandardizingPath.stringByResolvingSymlinksInPath;
+    if ([_deletingMachineDirectory isEqualToString:canonical]) {
+        _deletingMachineDirectory = nil;
+        [self notifyChanged];
+    }
+}
+
 - (BOOL)isVMRunning {
     return _vmRunning;
 }
@@ -311,6 +347,11 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 }
 
 - (BOOL)configureMachineDirectory:(NSString *)directory memoryMB:(uint64_t)memoryMB cpuCount:(NSInteger)cpuCount networkEnabled:(BOOL)networkEnabled audioEnabled:(BOOL)audioEnabled {
+    if (_deletingMachineDirectory) {
+        _vmStatus = @"Wait for virtual machine deletion to finish before starting a session.";
+        [self notifyChanged];
+        return NO;
+    }
     if (_vmRunning || _unpacking || _hasCreatedVM) {
         _vmStatus = @"Close and relaunch the app before changing machines after a VM session.";
         [self notifyChanged];
@@ -453,6 +494,11 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 - (void)prepareAndStartWithLayer:(nullable CAMetalLayer *)layer {
     if (layer) _pendingLayer = layer;
     if (_vmRunning || _unpacking) return;
+    if (_deletingMachineDirectory) {
+        _vmStatus = @"Wait for virtual machine deletion to finish before starting a session.";
+        [self notifyChanged];
+        return;
+    }
     if (_hasCreatedVM) {
         _vmStatus = @"Relaunch the app before starting another session; complete runtime teardown is not implemented.";
         [self notifyChanged];
@@ -475,7 +521,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     if (!self.isJITLive) {
         [self tryAcquireJIT:YES];
         if (!self.isJITLive) {
-            _vmStatus = @"Waiting for TXM JIT (attach StikDebug or launch_on_duo.sh)";
+            _vmStatus = @"JIT setup required. Use the device JIT helper or Enable JIT; Xcode Run alone is insufficient.";
             dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
             [self notifyChanged];
             return;
