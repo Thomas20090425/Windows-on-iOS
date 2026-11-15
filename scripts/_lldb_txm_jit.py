@@ -28,6 +28,18 @@ def run_cmd(debugger, cmd: str) -> str:
     return out
 
 
+def configure_symbol_lookup(debugger):
+    # Only this helper's debugger session is affected. Protocol addresses come
+    # from UUID-matched local Mach-O files; Spotlight/network symbol discovery
+    # must not hold up JIT setup. Never change the user's .lldbinit or defaults.
+    run_cmd(debugger, "settings set symbols.enable-external-lookup false")
+    run_cmd(debugger, "settings set symbols.enable-background-lookup false")
+    optional = lldb.SBCommandReturnObject()
+    debugger.GetCommandInterpreter().HandleCommand("settings set symbols.auto-download off", optional)
+    if not optional.Succeeded():
+        print("[txm-jit] This LLDB lacks symbols.auto-download; external/background lookup is disabled", flush=True)
+
+
 def write_reg(debugger, process, thread, reg_name: str, val_int: int):
     process.SetSelectedThread(thread)
     frame = thread.GetFrameAtIndex(0)
@@ -65,20 +77,33 @@ def find_brk_or_stopped_thread(process):
 
 
 def bless_txm_region(debugger, process, rx_addr: int, size: int):
-    t0 = time.time()
+    t0 = time.monotonic()
+    last_report = t0
+    print(f"[txm-jit] Preparing JIT memory: 0/{size >> 20} MiB. The app stays paused during this transfer.", flush=True)
+
+    def progress(done, force=False):
+        nonlocal last_report
+        now = time.monotonic()
+        if force or done == size or done % (16 << 20) == 0 or now - last_report >= 2:
+            print(f"[txm-jit] Preparing JIT memory: {done / (1 << 20):.0f}/{size >> 20} MiB "
+                  f"({100 * done / size:.0f}%, {now - t0:.1f}s)", flush=True)
+            last_report = now
+
     err = lldb.SBError()
     chunk_size = 1 << 20
     payload = b"\x69" * chunk_size
     wrote = process.WriteMemory(rx_addr, payload[: min(chunk_size, size)], err)
     if err.Success() and wrote == min(chunk_size, size):
         off = wrote
+        progress(off, force=True)
         while off < size:
             cur = min(chunk_size, size - off)
             w = process.WriteMemory(rx_addr + off, payload[:cur], err)
             if not err.Success() or w != cur:
                 raise RuntimeError(f"WriteMemory failed at +{off:#x}: {err.GetCString()}")
             off += w
-        dt = time.time() - t0
+            progress(off)
+        dt = time.monotonic() - t0
         print(f"[txm-jit] Blessed {size >> 20} MiB RX region at {rx_addr:#x} via bulk WriteMemory in {dt:.2f}s", flush=True)
         return
 
@@ -91,8 +116,8 @@ def bless_txm_region(debugger, process, rx_addr: int, size: int):
             out = run_cmd(debugger, f"process plugin packet send M{addr:x},1:69")
             if "OK" not in out:
                 raise RuntimeError(f"Failed to bless page {addr:#x}: {out}")
-        if (idx + 1) % 4096 == 0 or idx + 1 == pages:
-            print(f"[txm-jit] Blessed {idx + 1}/{pages} pages ({time.time() - t0:.1f}s)", flush=True)
+        progress((idx + 1) * 0x4000)
+    print(f"[txm-jit] Prepared {pages} JIT pages in {time.monotonic() - t0:.1f}s", flush=True)
 
 
 HELPER_TOKEN = 0x574A4954
@@ -118,7 +143,21 @@ def symbol_manifest():
         actual = read_image(image["path"])
         if actual != image:
             raise RuntimeError("Local app changed after symbol preflight. Rerun the launcher with the installed app's APP_PATH.")
+    for image_uuid, symbol_file in manifest.get("symbol_files", {}).items():
+        if normalized_uuid(read_image(symbol_file, include_symbols=False)["uuid"]) != normalized_uuid(image_uuid):
+            raise RuntimeError("Local dSYM no longer matches the app. Rerun the launcher after rebuilding.")
     return manifest
+
+
+def preload_local_symbols(target, manifest):
+    for image in manifest["images"]:
+        symbol_file = manifest.get("symbol_files", {}).get(image["uuid"])
+        if symbol_file:
+            module = target.AddModule(image["path"], "arm64-apple-ios", image["uuid"], symbol_file)
+        else:
+            module = target.AddModule(image["path"], "arm64-apple-ios", image["uuid"])
+        if not module.IsValid():
+            raise RuntimeError(f"LLDB could not load local image metadata: {image['path']}")
 
 
 def loaded_images(target):
@@ -162,10 +201,7 @@ def manifest_addresses(target, manifest):
 
 def wait_for_bootstrap(debugger, target, process, manifest):
     # Load metadata only. Do not assign guessed runtime addresses to modules.
-    for image in manifest["images"]:
-        module = target.AddModule(image["path"], "arm64-apple-ios", image["uuid"])
-        if not module.IsValid():
-            raise RuntimeError(f"LLDB could not load local image metadata: {image['path']}")
+    preload_local_symbols(target, manifest)
     breakpoint = target.BreakpointCreateByName("winios_jit_install_trap_handler")
     if not breakpoint.IsValid():
         raise RuntimeError("Cannot prepare the app bootstrap breakpoint")
@@ -213,6 +249,7 @@ def wait_for_bootstrap(debugger, target, process, manifest):
 def resolve_jit_addresses(debugger, target, process):
     manifest = symbol_manifest()
     if manifest:
+        preload_local_symbols(target, manifest)
         try:
             addresses = manifest_addresses(target, manifest)
         except JITImageNotLoaded:
@@ -275,6 +312,7 @@ def write_helper_token(process, address, value):
 
 
 def run_txm_jit(debugger, command, exe_ctx, result, internal_dict):
+    configure_symbol_lookup(debugger)
     debugger.SetAsync(False)
     target = debugger.GetSelectedTarget()
     process = target.GetProcess()

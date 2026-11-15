@@ -148,6 +148,10 @@ def launch(args):
     debugger = lldb.SBDebugger.Create(True)
     debugger.SetAsync(False)
 
+    # Configure only this debugger session, before attachment can trigger
+    # Spotlight/dsymForUUID lookups. Local UUID-checked metadata remains usable.
+    from _lldb_txm_jit import configure_symbol_lookup, txm_jit_cmd
+    configure_symbol_lookup(debugger)
     run_cmd(debugger, f"device select {core_device_id}")
     run_cmd(debugger, f"device process attach -p {pid}")
     target = debugger.GetSelectedTarget()
@@ -157,7 +161,6 @@ def launch(args):
     # Use the same strict handshake/trap policy as the universal device launcher.
     # Keeping a duplicate BRK loop here previously allowed unrelated traps to
     # be skipped and would bypass the helper-readiness check in newer apps.
-    from _lldb_txm_jit import txm_jit_cmd
     try:
         txm_jit_cmd(debugger, "", None, None, {})
     except Exception:

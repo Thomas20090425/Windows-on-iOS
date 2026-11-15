@@ -10,6 +10,8 @@ The user subsequently reported a start-time `EXC_BREAKPOINT` in the JIT
 assembly and requested deletion of past VMs.
 Their subsequent Mac launcher log reached device attachment but failed to find
 the readiness symbol; remote symbol availability had been mistaken for app age.
+The next log passed readiness/probe/RX allocation and stopped reporting progress
+while LLDB displayed external-symbol lookup during memory preparation.
 
 ## Completed source work
 
@@ -46,6 +48,9 @@ the readiness symbol; remote symbol availability had been mistaken for app age.
   deferred Debug loading stops at bootstrap before JIT readiness is written.
   Missing metadata, unloaded images and mismatched builds now have distinct
   diagnostics. Universal and Duo launchers share the metadata preflight.
+- Limited this helper's LLDB symbol discovery to local metadata, including
+  explicit UUID-matched dSYM files when present. Added memory preparation
+  progress in both transfer paths. No persistent debugger setting was changed.
 
 ## Build evidence and constraints
 
@@ -68,6 +73,10 @@ the readiness symbol; remote symbol availability had been mistaken for app age.
   Release/Debug symbol manifests were generated through read-only Mach-O
   inspection. No app source changed or new app build was needed; no debugger,
   device/VM execution or runtime test was performed for this correction.
+- User-provided evidence now confirms readiness read-back, probe handling and
+  384 MiB RX allocation. Completed JIT preparation/execution remains unverified.
+  The follow-up symbol-search/progress adjustment passed syntax compilation and
+  local dSYM metadata preparation only; no LLDB/device/VM was run by the agent.
 
 ## Remaining external/runtime work
 

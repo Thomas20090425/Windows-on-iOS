@@ -34,7 +34,7 @@ they do not validate the subsequently added app/device changes.
 | Local symbols for device launcher | **METADATA PREPARED; NOT DEVICE-TESTED** | `build/jit-symbols-release.json` and `build/jit-symbols-debug.json` record Mach-O UUIDs/addresses from the local products, including the Debug dylib. Python/shell syntax compilation passed. No LLDB process was launched during this correction. |
 | Simulator UI checks | **NOT RUN — USER REQUEST** | Simulator compilation/execution is not native JIT verification. |
 | Physical installation | **USER-REPORTED LAUNCH; NOT AGENT-TESTED** | User supplied devicectl output showing bundle `me.ammaar.windowsios` launched on device with PID 2377. Its precise build UUID was not logged. No installation or device launch executed by the agent. |
-| Device JIT initialization | **NOT TESTED** | Existing TXM trap protocol retained, selected-memory reservation added; no debugger attachment performed. |
+| Device JIT initialization | **PARTIAL USER-REPORTED EVIDENCE** | Latest supplied log shows helper readiness write/read-back, successful probe reply and allocation of 384 MiB RX memory at `0x1045e8000`. It does not show completed page preparation, RX execution self-check or helper detach. No debugger attachment performed by the agent. |
 | UEFI/ISO boot and unattended Windows installation | **NOT TESTED** | Open-source firmware is now bundled, but no Windows ISO was supplied and VM execution was prohibited. No successful installation is claimed. |
 | Keyboard/mouse/trackpad/Pencil | **NOT TESTED** | Native event → bridge → existing xHCI HID source path compiles; no physical or guest validation. |
 | Guest network/audio/storage | **NOT TESTED** | Native backends and configuration compile; actual guest drivers, persistence and device behavior unverified. |
@@ -96,7 +96,23 @@ separately. Direct LLDB symbol lookup also accepts non-data classifications.
 These use documented [LLDB module](https://lldb.llvm.org/python_api/lldb.SBModule.html)
 and [target](https://lldb.llvm.org/python_api/lldb.SBTarget.html) APIs. Syntax
 compilation and read-only local metadata preparation are the only new evidence;
-no successful device handshake or Windows boot is claimed.
+no completed device JIT initialization or Windows boot is claimed.
+
+A later user log now establishes partial device handshake progress: readiness
+was armed/read back, `BRK #0x69` was answered and `_M` allocated 384 MiB RX.
+It then repeatedly displayed “Locating external symbol file: WindowsiOS” with
+no completed preparation message. That establishes the last reported stage,
+not the duration or precise cause of a hang. LLDB uses the same status label
+for local and external symbol searches, so it is not proof of network traffic.
+
+The helper now disables external/background symbol search before attachment,
+optionally disables automatic symbol downloads on LLDB versions supporting it,
+loads a local dSYM only after UUID validation, and prints MiB/percentage/elapsed
+progress in bulk and per-page memory preparation. Settings affect only that
+LLDB session. A single blocked debugger call can still delay output; no bounded
+device completion time is promised. Source reference: [LLDB symbol lookup settings](https://raw.githubusercontent.com/llvm/llvm-project/main/lldb/source/Core/CoreProperties.td).
+Python/shell syntax compilation and read-only dSYM metadata preparation passed;
+this specific change was not executed against a device.
 
 VM deletion now has sidebar swipe/context and detail actions, named confirmation,
 strict library-directory/symlink validation, background removal and a native

@@ -17,7 +17,7 @@ BOOTSTRAP = "winios_jit_install_trap_handler"
 CPU_ARM64 = 0x0100000C
 
 
-def read_image(path):
+def read_image(path, include_symbols=True):
     """Return unslid addresses from an arm64 executable or Debug dylib."""
     raw = Path(path).read_bytes()
     offset, size = 0, len(raw)
@@ -68,7 +68,7 @@ def read_image(path):
     if image_uuid is None or text_vmaddr is None:
         raise ValueError(f"Mach-O UUID or __TEXT missing: {path}")
     symbols = {}
-    if symtab:
+    if symtab and include_symbols:
         symoff, nsyms, stroff, strsize = symtab
         if symoff + nsyms * 16 > size or stroff + strsize > size:
             raise ValueError(f"Invalid Mach-O symbol table: {path}")
@@ -110,8 +110,26 @@ def build_manifest(app, bundle_id=None):
     images = [read_image(path) for path in paths]
     if not any(all(name in image["symbols"] for name in REQUIRED) for image in images):
         raise ValueError(f"This local app lacks current JIT helper symbols: {app}. Rebuild it or pass APP_PATH pointing to the matching current .app.")
+    symbol_files = {}
+    root = Path(__file__).resolve().parent.parent
+    for image in images:
+        # Only explicit nearby build products are considered, never Spotlight
+        # or recursive disk/network searches. A dSYM is optional and UUID-bound.
+        candidates = [app.parent / (app.name + ".dSYM") / "Contents/Resources/DWARF" / Path(image["path"]).name]
+        for configuration in ("Release", "Debug"):
+            candidates.append(root / "build/DerivedData/Build/Products" / (configuration + "-iphoneos") /
+                              (app.name + ".dSYM") / "Contents/Resources/DWARF" / Path(image["path"]).name)
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            try:
+                if read_image(candidate, include_symbols=False)["uuid"] == image["uuid"]:
+                    symbol_files[image["uuid"]] = str(candidate.resolve())
+                    break
+            except (ValueError, OSError, struct.error):
+                continue
     return {"version": 1, "app": str(app), "bundle_identifier": identifier,
-            "executable": str(executable), "images": images}
+            "executable": str(executable), "images": images, "symbol_files": symbol_files}
 
 
 def main():

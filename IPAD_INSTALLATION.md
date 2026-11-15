@@ -137,6 +137,14 @@ rejects Xcode-managed profiles when forced into manual signing mode.
    detaches; unknown stops are left stopped and reported as errors. Updated
    helpers write and read back an explicit readiness word before resuming the
    app. Keep the helper script and installed app from the same build.
+
+   During the 384 MiB JIT memory preparation, Terminal reports transferred MiB,
+   percentage and elapsed time. The app stays paused during this stage. The
+   helper disables external/background symbol lookup for its own LLDB session
+   and uses a nearby UUID-matched local dSYM when available. No persistent
+   debugger preferences are changed. A single blocked debugger operation can
+   still delay progress output; unchanged counters for several minutes should
+   not be treated as proof that Windows is booting.
 8. The firmware boots the ISO through the virtual USB mass-storage optical
    drive. Windows Setup uses the generated answer disk to partition the new
    Windows disk and install **image index 1**, the first Windows edition on the
@@ -244,6 +252,7 @@ iPadOS may suspend or terminate the app. Keep it foregrounded while working.
 | `EXC_BREAKPOINT` in `winios_brk.S` | The stopped instructions are the custom JIT protocol. Rebuild/reinstall the current app and use its matching helper. A normal Xcode Run attachment does not service that protocol; do not skip arbitrary breakpoint instructions. |
 | LLDB cannot find `winios_jit_helper_token` | Use the updated launcher and the matching local `.app`. This error can mean absent LLDB metadata or an unloaded Debug dylib; it does not alone establish an old app. |
 | App UUID mismatch | Set `APP_PATH` to the exact Xcode-built app installed on the device, or install `distribution/WindowsiOS.app` and launch using that same path. No address guessing is permitted. |
+| Stuck at “Locating external symbol file” after RX allocation | Interrupt the old helper with Ctrl+C; if an LLDB prompt appears, type `quit`. Rerun the updated launcher, which limits symbol lookup to local metadata and prints JIT memory-transfer progress. That status is symbol discovery, not Windows boot. |
 | Delete unavailable | Stop the VM and relaunch the app to release retained engine state. Wait for imports/extraction/deletion to finish. |
 | JIT trap/allocation failure | Record the OS/model and helper error. This device/OS combination remains unsupported until verified. |
 | Insufficient reservation | Relaunch, select supported memory before Start, and initialize JIT again. No sub-4-GiB fallback is used. |

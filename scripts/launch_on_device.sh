@@ -48,6 +48,7 @@ PY
 echo "Attaching JIT helper. In the app, select a VM and Start to request JIT allocation."
 WINIOS_JIT_SYMBOLS_JSON="$SYMBOLS_JSON" PYTHONPATH="$ROOT/scripts" xcrun lldb -b \
     -o 'script lldb.debugger.SetAsync(False)' \
-    -o "device select $CORE_ID" -o "device process attach -p $PID" \
     -o "command script import \"$ROOT/scripts/_lldb_txm_jit.py\"" \
+    -o 'script import _lldb_txm_jit; _lldb_txm_jit.configure_symbol_lookup(lldb.debugger)' \
+    -o "device select $CORE_ID" -o "device process attach -p $PID" \
     -o txm_jit_run
