@@ -4,6 +4,8 @@ Target clarified by user: Windows 11 **24H2** ARM64 (not “24H4”).
 User subsequently requested **compilation only**, with no tests, VM execution,
 profiling or debugger use on this Mac. Later additions: Apple Pencil input and
 UTM-informed, engine-backed VM configuration.
+The user then corrected setup requirements: **Windows ISO only**, firmware
+bundled with the app, automatic private NVRAM, and app-created writable disks.
 
 ## Completed source work
 
@@ -21,6 +23,13 @@ UTM-informed, engine-backed VM configuration.
   original Duo path and SDK-safe conditional hinge observer.
 - Optional Windows cleanup preserves security/update/mitigation defaults and
   rejects replacement of an existing cleanup image.
+- Replaced normal media import with an ISO-only creation wizard and 64–512 GiB
+  sparse disks in iPad app storage. Added fresh per-VM variables, genuine USB
+  optical media, and a generated FAT16 unattended setup disk guarded to fresh
+  app-created blank targets. Warm resets remove formatting answers after disk
+  partitioning, preserving existing installations.
+- Bundled matched EDK2 code/variable-template banks with pinned Debian package
+  checksums, provenance and redistribution notices. No user firmware import.
 
 ## Build evidence and constraints
 
@@ -29,17 +38,22 @@ UTM-informed, engine-backed VM configuration.
 - Core baseline checks had completed before the user added the build-only
   constraint. No subsequent tests or runtime checks were performed.
 - Final integrated **signed build succeeded**; app, development IPA and manifest
-  are in `distribution/`. Final log: `build/logs/ios-app-build-signed-final.log`.
+  are in `distribution/`. Final log: `build/logs/ios-app-build-iso-signed.log`.
   Signature/package checks passed. Installation is limited to the embedded
-  development profile's two registered devices. Full evidence is in VALIDATION_REPORT.md.
+  development profile's seven registered devices. Full evidence is in VALIDATION_REPORT.md.
 - Implementation milestone: `69b2e7e` — native iPad sessions, Pencil input and
   validated VM configuration, on `codex/ipad-24h2-build`.
+- ISO-only setup correction: `01b9340` — bundled UEFI, fresh NVRAM, app-created
+  Windows disk, USB optical media and generated automatic setup answers.
 
 ## Remaining external/runtime work
 
 - Install on an appropriately provisioned iPad; verify the JIT trap protocol,
   actual memory behavior, UEFI/Windows boot, physical input and guest I/O.
 - No suitable iPad/Duo was available. No Windows media was supplied locally.
+- ISO boot/unattended setup remains unverified. No virtual TPM is implemented;
+  Windows Setup may reject the platform. No requirement bypass or fabricated
+  successful installation was added.
 - Pencil pressure/tilt/eraser/Windows Ink digitizer support, complete VM teardown,
   suspend/snapshots, dynamic guest resolution and accelerated guest graphics
   remain unavailable. No speedup or universal iPad compatibility is claimed.

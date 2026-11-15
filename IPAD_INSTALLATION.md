@@ -18,9 +18,13 @@ been verified to boot Windows in this session. See [VALIDATION_REPORT.md](VALIDA
   not independently verified that hardware or its upstream boot claims.
 - Apple Pencil and mouse/keyboard are optional; Pencil requires a compatible
   iPad/Pencil pairing. Hover additionally requires hardware that exposes it.
-- Keep enough free storage for the prepared disk, imported archive, extraction
-  and Windows updates. A sparse disk's logical capacity differs from its
-  allocated storage usage. Import keeps the source archive for recovery.
+- Supply only your licensed **Windows 11 24H2 ARM64 installation ISO**. UEFI
+  firmware and its variable-store template are included with the app.
+- Select a Windows disk capacity from 64 to 512 GiB. The app creates a sparse,
+  writable disk on the iPad; it grows as Windows writes data. Creation requires
+  free storage for an app-private ISO copy plus 32 GiB of installation headroom
+  and setup files. That admission check does not reserve the disk's full future
+  capacity, so keep enough free storage for Windows and its updates.
 
 ## Build and signing
 
@@ -34,8 +38,11 @@ From the repository root:
 JOBS=2 ./scripts/build_ios_app.sh
 ```
 
-This compiles dependencies, the native iOS archive and a generic arm64 device
-app into `distribution/WindowsiOS.app`. It does not run tests, simulators,
+This downloads/checksums the pinned redistributable EDK2 firmware, compiles
+dependencies, the native iOS archive and a generic arm64 device app into
+`distribution/WindowsiOS.app`. The firmware, matching variable-store template,
+licenses and provenance are bundled in the app's `Firmware` folder. No Windows
+media is downloaded or bundled. The build does not run tests, simulators,
 debuggers, or a VM. An unsigned build cannot be installed directly.
 
 For development signing, use your own team and a profile registering your iPad:
@@ -54,37 +61,7 @@ Automatic signing was used for the supplied artifact. Set
 `PROVISIONING_PROFILE_SPECIFIER` only for a manually managed profile; Xcode
 rejects Xcode-managed profiles when forced into manual signing mode.
 
-## Prepare your Windows installation
-
-Supply your own licensed **Windows 11 24H2 ARM64** installation. The existing
-provisioner expects `work/downloads/Win11_24H2_ARM64_en-us.esd`, EDK2 ArmVirtQemu
-firmware at `work/code.fd`, and the required ARM64 NetKVM driver files.
-Review `scripts/provision_windows_arm64.py` before using it on a capable Mac.
-Provisioning runs a VM; it is separate from the compile-only app build.
-
-The app consumes an already prepared raw system disk, not an installer ISO,
-VHDX or QCOW2 file. Create/convert/provision the disk on a capable host first.
-No Windows installation media, firmware, or proprietary guest driver is included
-in the distributed app. Required per-machine files are:
-
-| File | Purpose |
-| --- | --- |
-| `code.fd` | EDK2 ArmVirtQemu UEFI firmware, read-only |
-| `vars.fd` | Persistent UEFI variable store, writable |
-| `windows11.img` or `windows11.hvsparse` | Prepared Windows ARM64 system disk |
-| `secondary.img` (optional) | Additional raw disk attached read-only |
-
-`build/hvsparse pack SOURCE.img OUTPUT.hvsparse` packages raw sparse disks for
-transfer, if you have built that separate host utility. A complete bootable
-Windows disk and valid firmware/NVRAM are still your responsibility.
-
-The optional `optimize_windows_lite.py` now preserves Defender, SmartScreen,
-Windows Update, code integrity and CPU mitigations. It refuses to overwrite an
-existing cleanup image. It no longer invokes the legacy `opt_hive_arm64.exe`,
-which disables protections. Do not use that legacy helper for this workflow.
-No performance or idle-RAM improvement has been measured for the new profile.
-
-## Install, import, then enable JIT
+## Install the app and import your Windows ISO
 
 1. Pair your iPad with Xcode, trust the Mac and enable Developer Mode as required
    by the device. Register it in your development provisioning profile.
@@ -94,26 +71,60 @@ No performance or idle-RAM improvement has been measured for the new profile.
    ./scripts/install_on_device.sh DEVICE_ID distribution/WindowsiOS.app
    ```
 
-3. Open WindowsiOS on the iPad. Create a machine in the VM Library and import
-   firmware, variable store and prepared disk using the native file picker.
-   Imports copy files into a private staging path, reject overwrites and publish
-   after copying. Alternatively, use Finder file sharing to place files in
-   `Documents/Machines/Win11/`; that directory is discovered by the library.
-4. Set the desired per-machine options before starting. Choose 4 GiB initially;
+3. Open WindowsiOS on the iPad and choose **New Machine**. Enter a name, choose
+   the Windows disk capacity and tap **Import Windows ISO and Create**. Select
+   your Windows 11 ARM64 `.iso` using the native file picker. An x64 ISO, ESD,
+   VHDX or prepared raw disk is not the installation ISO expected by this flow.
+   The app checks the optical-disc descriptor; it cannot establish that the
+   supplied Windows edition is boot-compatible without actually booting it.
+4. Keep WindowsiOS open while it imports the ISO. The app creates these files
+   privately and publishes the machine only when preparation succeeds:
+
+   | File | Automatically supplied or created by the app |
+   | --- | --- |
+   | Bundled `Firmware/code.fd` | Read-only EDK2 ArmVirtQemu firmware |
+   | `vars.fd` | Private writable copy of the matching bundled UEFI variable template |
+   | `windows11.img` | New sparse writable Windows disk at your selected capacity |
+   | `installer.iso` | Read-only app-private copy of your selected ISO |
+   | `setup-support.img` | Small FAT answer disk for automatic Windows partitioning/install |
+   | `installation-created.json` | Marker restricting automatic answers to the new app-created blank disk |
+
+   You do not find, download or import firmware or a variable store yourself.
+   Existing VMs and disks are not overwritten.
+5. Set the desired per-machine options before starting. Choose 4 GiB initially;
    4.25/4.5 GiB depend on both host admission and the JIT-time RAM reservation.
-5. To initialize the existing debugger-assisted JIT path, explicitly run:
+6. To initialize the existing debugger-assisted JIT path, explicitly run:
 
    ```bash
    ./scripts/launch_on_device.sh DEVICE_ID me.ammaar.windowsios
    ```
 
-6. The helper launches the app stopped and attaches to the **iPad process**.
+7. The helper launches the app stopped and attaches to the **iPad process**.
    Select the machine and tap **Start Windows** on the iPad while the helper is
    active. iPad JIT allocation waits until this selection, so the reservation
    uses that machine's memory setting. The helper services known JIT traps and
    detaches; unknown stops are left stopped and reported as errors.
-7. Wait for archive extraction if necessary, then for the guest firmware/Windows
-   startup. Check JIT, USB and NAT backend status in session diagnostics.
+8. The firmware boots the ISO through the virtual USB mass-storage optical
+   drive. Windows Setup uses the generated answer disk to partition the new
+   Windows disk and install **image index 1**, the first Windows edition on the
+   ISO. Setup may request a product key/license, language or account details
+   inside the guest; no user account or credentials are preconfigured.
+   Optical installation and the NVMe system disk use Windows inbox driver
+   paths; no custom optical driver is a creation prerequisite.
+
+The automatic answer includes Windows Setup EULA acceptance for the requested
+installation. It does not add registry requirement bypasses, disable security
+features, or embed a product key. It is attached only to an app-marked blank
+target. Startup and warm-reset guards remove the automatic answer path after
+the primary disk is partitioned, preventing repeat automatic formatting of an
+installed VM. The primary disk remains writable throughout installation.
+
+**Installation remains runtime-unverified.** This engine does not implement a
+TPM, and Windows Setup may reject its hardware requirements or encounter other
+firmware/device limitations. Bundling Secure Boot-capable EDK2 firmware and a
+Microsoft-enrolled variable template does not prove that guest Secure Boot or
+Windows 11 platform compliance works on this virtual hardware. No requirement
+bypass is silently applied to turn such a rejection into a successful install.
 
 These install and launch commands are procedures for the device owner; they
 were not executed during this build-only session. `launch_on_duo.sh` remains
@@ -121,6 +132,23 @@ available for the original Duo workflow. With SDKs declaring the original
 `UIHingeInteraction` API, enable `WINIOS_HINGE_SDK` in Swift compilation
 conditions; the installed SDK does not declare that API, so its observer is
 guarded and the original manual posture controls remain available.
+
+## Advanced: existing prepared installations
+
+The ISO-only flow above is the normal setup path and does not require a Mac-side
+Windows provisioning stage. Existing `Documents/Machines/Win11` installations
+can still be discovered. Advanced disk import accepts prepared `.img`/`.raw` or
+`.hvsparse` primary disks and an optional read-only `secondary.img`; these
+controls are hidden for machines managed by automatic ISO installation.
+Legacy per-machine `code.fd` firmware takes precedence when present; new
+machines use the bundled firmware automatically. Existing variable stores and
+disks are preserved rather than reset or replaced.
+
+The legacy Mac provisioner and `hvsparse` tool remain available for existing
+workflows. They are not prerequisites for ISO setup inside the app. The optional
+`optimize_windows_lite.py` preserves security/update/mitigation defaults and
+does not invoke the old security-disabling `opt_hive_arm64.exe` helper. No
+performance benefit has been measured for that cleanup profile.
 
 ## Controls and configuration
 
@@ -148,7 +176,8 @@ guarded and the original manual posture controls remain available.
   `http://10.0.2.4/`. Only put files intended for the guest there. Sharing requires
   NAT enabled. NAT backend readiness does not prove guest driver connectivity.
 - Read-only primary disks usually cannot run a normal Windows desktop requiring
-  writes. This is a storage protection option, not a disposable snapshot.
+  writes. This advanced legacy option is disabled for automatic ISO installation.
+  It is a storage protection option, not a disposable snapshot.
 - The app fits the guest framebuffer to the host window. Guest resolution is
   controlled by firmware/Windows; there is no SPICE dynamic-resolution agent.
 
@@ -167,7 +196,9 @@ iPadOS may suspend or terminate the app. Keep it foregrounded while working.
 | Waiting for JIT | Run the device launch helper, then tap Start on the iPad. A signed app alone does not enable JIT. |
 | JIT trap/allocation failure | Record the OS/model and helper error. This device/OS combination remains unsupported until verified. |
 | Insufficient reservation | Relaunch, select supported memory before Start, and initialize JIT again. No sub-4-GiB fallback is used. |
-| Media missing | Import all three required files into the same machine. |
+| Missing bundled firmware | Rebuild/reinstall the app. Firmware preparation runs during the app build; no firmware picker is required. |
+| ISO import fails | Choose the original Windows 11 ARM64 ISO and check free iPad storage. Failed creation removes only the new staging directory. |
+| Windows Setup rejects requirements | The virtual platform has no TPM. Capture the guest error; no silent requirement or security bypass is applied. |
 | Existing raw disk + archive | Raw disk takes precedence. Back up before managing files; extraction will not replace it. |
 | Extraction error | Check free storage and archive integrity. Source archive and existing raw disks are retained. |
 | No network | Check NAT backend diagnostics, port conflicts and the guest's ARM64 NetKVM driver. |

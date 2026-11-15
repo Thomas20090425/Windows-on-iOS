@@ -22,6 +22,13 @@ only: iPad JIT, Windows boot and physical input have not been tested.**
 The showcase and performance claims below describe the upstream repository;
 they were not reproduced during this work.
 
+Normal setup now requires only your **Windows 11 ARM64 ISO** and a selected
+disk capacity. The app includes matched, redistributable EDK2 firmware, creates
+private writable NVRAM and a sparse Windows disk, attaches the ISO as a USB DVD,
+and generates removable unattended setup media. No firmware or variable-store
+import is required. Windows Setup/OOBE prompts and platform requirements still
+apply; this engine has no virtual TPM. See the installation guide for limits.
+
 Use `JOBS=2 ./scripts/build_ios_app.sh` for a compile-only build. Add your
 `DEVELOPMENT_TEAM` for development signing. Outputs are in `distribution/`.
 See [iPad installation](IPAD_INSTALLATION.md), [verification evidence](VALIDATION_REPORT.md),
