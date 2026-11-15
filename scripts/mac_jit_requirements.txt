@@ -1,0 +1,2 @@
+# Kept outside the app; the Mac launcher uses an isolated environment in work/.
+pymobiledevice3==11.55.1

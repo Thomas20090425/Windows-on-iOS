@@ -58,6 +58,14 @@ was advancing slowly, projecting 22.2 minutes at that measured rate.
   the 384 MiB region are still visited; the payload is 24 KiB rather than
   384 MiB. Preserved RX checks and added an observed ETA. A packet-size-tuned
   bulk mode remains explicit diagnostics only; no measured new speedup claimed.
+- Replaced that serial default after the user's timing showed it was slower.
+  Mac launches now use an owned loopback RSP proxy and pinned pymobiledevice3
+  USB forwarder, sending up to 128 page commands before collecting their exact
+  acknowledgements. The entire 384 MiB allocation is still prepared. Compression
+  refusal, no-ack negotiation/checksum handling, target-stop checks and fatal
+  unexpected traffic prevent protocol drift. Existing UUID/readiness/RX checks
+  remain. The original Xcode transport is explicit fallback with bounded
+  bulk/page calibration. StikDebug installation is not required for the Mac path.
 
 ## Build evidence and constraints
 
@@ -92,6 +100,11 @@ was advancing slowly, projecting 22.2 minutes at that measured rate.
   Investigated StikDebug's 128-command batching and verified the app's existing
   custom-script URL handoff against official source. Recommended evaluating
   that path; no completion-time or Windows-boot claim and no agent runtime run.
+- The user then selected computer-only launching. Implemented the batched Mac
+  transport, installed its dependencies in `work/mac-jit-venv`, and completed
+  Python/shell syntax compilation and independent source review. No debugger,
+  device tunnel, VM, or test workload was run. No native app source changed;
+  the existing signed app remains applicable. New batch timing remains unverified.
 
 ## Remaining external/runtime work
 

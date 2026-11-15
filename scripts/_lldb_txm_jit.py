@@ -83,14 +83,110 @@ def bless_txm_region(debugger, process, rx_addr: int, size: int):
         raise RuntimeError("Invalid JIT region; refusing debugger memory preparation")
     if process.GetState() != lldb.eStateStopped:
         raise RuntimeError("JIT memory preparation requires a stopped target process")
-    mode = os.environ.get("WINIOS_JIT_PREPARE", "pages")
+    mode = os.environ.get("WINIOS_JIT_PREPARE", "auto")
+    if mode == "proxy":
+        return bless_txm_proxy(debugger, rx_addr, size, page_size)
+    if mode not in ("auto", "pages", "bulk"):
+        raise RuntimeError("WINIOS_JIT_PREPARE must be auto (default), pages, bulk, or proxy")
+    if mode in ("auto", "bulk"):
+        try:
+            # This is the encoded remote packet limit, not the Python buffer
+            # size. Normal M writes encode each payload byte as two hex digits.
+            # Without this override some stubs leave LLDB at 256-byte writes.
+            run_cmd(debugger, "process plugin packet xfer-size 131072")
+        except RuntimeError as error:
+            if mode == "bulk":
+                raise
+            print(f"[txm-jit] Cannot tune bulk transfer size; using page writes: {error}", flush=True)
+            mode = "pages"
+    if mode == "auto":
+        mode = select_txm_prepare_method(debugger, process, rx_addr, size, page_size)
     if mode == "bulk":
-        # Explicit diagnostic escape hatch. The measured old bulk path was
-        # ~22 minutes at 21 MiB/72.9s; do not silently choose it again.
-        run_cmd(debugger, "process plugin packet xfer-size 131072")
         return bless_txm_bulk(debugger, process, rx_addr, size)
-    if mode != "pages":
-        raise RuntimeError("WINIOS_JIT_PREPARE must be pages (default) or bulk")
+    return bless_txm_pages(debugger, rx_addr, size, page_size)
+
+
+def packet_response(debugger, packet: str) -> str:
+    output = run_cmd(debugger, f"process plugin packet send {packet}")
+    replies = re.findall(r"^[ \t]*response:[ \t]*([^\r\n]*)", output, re.MULTILINE)
+    if len(replies) != 1:
+        raise RuntimeError(f"Debugger packet did not return exactly one response: {output.strip()}")
+    return replies[0].strip()
+
+
+def prepare_txm_page(debugger, address: int):
+    reply = packet_response(debugger, f"M{address:x},1:69")
+    if reply != "OK":
+        raise RuntimeError(f"JIT page at {address:#x} was not acknowledged: {reply!r}. "
+                           "The app remains stopped; no pages are skipped.")
+
+
+def write_txm_bulk(process, address: int, payload: bytes):
+    error = lldb.SBError()
+    written = process.WriteMemory(address, payload, error)
+    if not error.Success() or written != len(payload):
+        raise RuntimeError(f"Bulk JIT write at {address:#x} wrote {written}/{len(payload)} bytes: "
+                           f"{error.GetCString() or 'incomplete write'}")
+
+
+def select_txm_prepare_method(debugger, process, rx_addr: int, size: int, page_size: int) -> str:
+    # Calibrate on this connection rather than assuming that fewer payload
+    # bytes beat fewer round trips. Samples stay inside the fresh RX region;
+    # the selected method then prepares the entire region, including samples.
+    bulk_size = min(1 << 20, size)
+    sample_pages = min(8, size // page_size)
+    print(f"[txm-jit] Comparing tuned bulk ({bulk_size >> 10} KiB) with "
+          f"{sample_pages} page writes on this debugger connection. The app stays paused.", flush=True)
+    started = time.monotonic()
+    try:
+        write_txm_bulk(process, rx_addr, b"\x69" * bulk_size)
+    except RuntimeError as error:
+        print(f"[txm-jit] Bulk sample failed; preparing every page with acknowledged writes: {error}", flush=True)
+        return "pages"
+    bulk_seconds = max(time.monotonic() - started, 0.000001)
+    started = time.monotonic()
+    for index in range(sample_pages):
+        prepare_txm_page(debugger, rx_addr + index * page_size)
+    page_seconds = max(time.monotonic() - started, 0.000001)
+    bulk_rate = bulk_size / bulk_seconds
+    page_rate = sample_pages * page_size / page_seconds
+    # Small timing differences are noisy; bulk must have a clear advantage.
+    selected = "bulk" if bulk_rate > page_rate * 1.10 else "pages"
+    rate = bulk_rate if selected == "bulk" else page_rate
+    print(f"[txm-jit] Observed coverage: tuned bulk {bulk_rate / (1 << 20):.2f} MiB/s, "
+          f"page writes {page_rate / (1 << 20):.2f} MiB/s; selecting {selected}. "
+          f"Estimated preparation time {size / rate:.0f}s (connection speed can vary).", flush=True)
+    return selected
+
+
+def bless_txm_proxy(debugger, rx_addr: int, size: int, page_size: int):
+    capability = packet_response(debugger, "qWiniosPrepare")
+    if capability != "WiniosPrepare:1;page:4000;batch:80":
+        raise RuntimeError(f"JIT batching proxy is not ready: {capability!r}. "
+                           "Use the Mac proxy launcher; the app remains stopped.")
+    print(f"[txm-jit] Preparing {size // page_size:,} JIT pages through the Mac batching proxy "
+          "(128 page writes per batch). The app stays paused.", flush=True)
+    started = time.monotonic()
+    offset = 0
+    while offset < size:
+        # Each request is bounded to 512 pages / four batches so progress and
+        # failures are reported without waiting for the full 384 MiB region.
+        chunk = min(8 << 20, size - offset)
+        reply = packet_response(debugger, f"qWiniosPrepare:{rx_addr + offset:x},{chunk:x},{page_size:x}")
+        if reply != "OK":
+            raise RuntimeError(f"JIT batching proxy failed at +{offset:#x}: {reply!r}. "
+                               "The app remains stopped; no pages are skipped.")
+        offset += chunk
+        elapsed = time.monotonic() - started
+        remaining = elapsed * (size - offset) / offset
+        print(f"[txm-jit] Prepared JIT pages: {offset // page_size:,}/{size // page_size:,} "
+              f"({100 * offset / size:.0f}%, {offset >> 20}/{size >> 20} MiB covered, "
+              f"{elapsed:.1f}s, observed ETA {remaining:.0f}s)", flush=True)
+    print(f"[txm-jit] All {size // page_size:,} JIT pages acknowledged in "
+          f"{time.monotonic() - started:.1f}s. The app's RX execution check still runs before the VM starts.", flush=True)
+
+
+def bless_txm_pages(debugger, rx_addr: int, size: int, page_size: int):
     pages = size // page_size
     started = last_report = time.monotonic()
     print(f"[txm-jit] Preparing {pages:,} JIT pages covering {size >> 20} MiB "
@@ -98,11 +194,7 @@ def bless_txm_region(debugger, process, rx_addr: int, size: int):
     print("[txm-jit] Using serial debugger packets; completion depends on observed round-trip latency.", flush=True)
     for index in range(pages):
         address = rx_addr + index * page_size
-        output = run_cmd(debugger, f"process plugin packet send M{address:x},1:69")
-        replies = re.findall(r"^[ \t]*response:[ \t]*([^\r\n]*)", output, re.MULTILINE)
-        if len(replies) != 1 or replies[0].strip() != "OK":
-            raise RuntimeError(f"JIT page {index + 1}/{pages} at {address:#x} was not acknowledged: "
-                               f"{output.strip()}. The app remains stopped; no pages are skipped.")
+        prepare_txm_page(debugger, address)
         done = index + 1
         now = time.monotonic()
         if done == 1 or done == pages or done % 256 == 0 or now - last_report >= 2:
@@ -131,36 +223,17 @@ def bless_txm_bulk(debugger, process, rx_addr: int, size: int):
                   f"({100 * done / size:.0f}%, {now - t0:.1f}s)", flush=True)
             last_report = now
 
-    err = lldb.SBError()
     chunk_size = 1 << 20
     payload = b"\x69" * chunk_size
-    wrote = process.WriteMemory(rx_addr, payload[: min(chunk_size, size)], err)
-    if err.Success() and wrote == min(chunk_size, size):
-        off = wrote
-        progress(off, force=True)
-        while off < size:
-            cur = min(chunk_size, size - off)
-            w = process.WriteMemory(rx_addr + off, payload[:cur], err)
-            if not err.Success() or w != cur:
-                raise RuntimeError(f"WriteMemory failed at +{off:#x}: {err.GetCString()}")
-            off += w
-            progress(off)
-        dt = time.monotonic() - t0
-        print(f"[txm-jit] Blessed {size >> 20} MiB RX region at {rx_addr:#x} via bulk WriteMemory in {dt:.2f}s", flush=True)
-        return
-
-    print(f"[txm-jit] Bulk WriteMemory returned ({wrote}, {err.GetCString()}); falling back to per-16K-page M packets...", flush=True)
-    pages = size // 0x4000
-    for idx in range(pages):
-        addr = rx_addr + idx * 0x4000
-        w = process.WriteMemory(addr, b"\x69", err)
-        if not err.Success() or w != 1:
-            out = run_cmd(debugger, f"process plugin packet send M{addr:x},1:69")
-            replies = re.findall(r"^[ \t]*response:[ \t]*([^\r\n]*)", out, re.MULTILINE)
-            if len(replies) != 1 or replies[0].strip() != "OK":
-                raise RuntimeError(f"Failed to bless page {addr:#x}: {out}")
-        progress((idx + 1) * 0x4000)
-    print(f"[txm-jit] Prepared {pages} JIT pages in {time.monotonic() - t0:.1f}s", flush=True)
+    off = 0
+    while off < size:
+        cur = min(chunk_size, size - off)
+        write_txm_bulk(process, rx_addr + off, payload[:cur])
+        off += cur
+        progress(off, force=off == cur)
+    dt = time.monotonic() - t0
+    print(f"[txm-jit] Prepared all {size >> 20} MiB RX region at {rx_addr:#x} via tuned bulk WriteMemory "
+          f"in {dt:.2f}s. The app's RX execution check still runs before the VM starts.", flush=True)
 
 
 HELPER_TOKEN = 0x574A4954

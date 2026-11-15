@@ -32,7 +32,8 @@ they do not validate the subsequently added app/device changes.
 | New input/UI/config/lifecycle/storage tests | **NOT RUN — USER REQUEST** | Source and build checks only; no runtime assertions claimed. |
 | JIT helper correction and VM deletion | **COMPILED; NOT RUNTIME-TESTED** | Release/Debug compile; exported readiness word and exact assembly trap labels are present in the packaged Mach-O. Python/JavaScript helper syntax checks passed. No helper attachment or user VM deletion executed. |
 | Local symbols for device launcher | **METADATA PREPARED; NOT DEVICE-TESTED** | `build/jit-symbols-release.json` and `build/jit-symbols-debug.json` record Mach-O UUIDs/addresses from the local products, including the Debug dylib. Python/shell syntax compilation passed. No LLDB process was launched during this correction. |
-| JIT preparation transport | **BOTH MAC PATHS USER-TIMED; TOO SLOW ON THIS CONNECTION** | Bulk: 21 MiB/72.9 s projects 22.2 minutes. Serial sparse: 316/24,576 pages in 24.4 s projects about 31.6 minutes. Smaller payload did not overcome per-command cost. Neither log reaches completed JIT preparation. StikDebug's batched path remains device-unverified for this app. |
+| Serial JIT preparation baseline | **USER-TIMED; TOO SLOW ON THIS CONNECTION** | Bulk: 21 MiB/72.9 s projects 22.2 minutes. Serial sparse: 316/24,576 pages in 24.4 s projects about 31.6 minutes. Smaller payload did not overcome per-command cost. Neither log reaches completed JIT preparation. |
+| Mac JIT batch transport | **SYNTAX COMPILED; NOT DEVICE-TIMED** | Default launcher now uses an owned loopback RSP proxy and pinned pymobiledevice3 USB forwarder, with up to 128 page commands in flight. Python/shell syntax compilation and source review only. Dependencies installed in isolated `work/mac-jit-venv`; no tunnel, debugger, device or VM run by the agent. |
 | Simulator UI checks | **NOT RUN — USER REQUEST** | Simulator compilation/execution is not native JIT verification. |
 | Physical installation | **USER-REPORTED LAUNCH; NOT AGENT-TESTED** | User supplied devicectl output showing bundle `me.ammaar.windowsios` launched on device with PID 2377. Its precise build UUID was not logged. No installation or device launch executed by the agent. |
 | Device JIT initialization | **PARTIAL USER-REPORTED EVIDENCE** | Latest supplied log shows helper readiness write/read-back, successful probe reply and allocation of 384 MiB RX memory at `0x1045e8000`. It does not show completed page preparation, RX execution self-check or helper detach. No debugger attachment performed by the agent. |
@@ -145,6 +146,29 @@ against current official StikDebug source: both schemes are registered,
 URL-safe Base64 is decoded, PID-targeted custom scripts are accepted, and the
 app supplies the handshake script automatically. No new app source or runtime
 validation was performed for that review.
+
+The user subsequently chose Mac-only launching. The default device launcher now
+creates a no-root USB userspace debugproxy forwarder through pinned
+`pymobiledevice3==11.55.1`, with an owned loopback RSP proxy between LLDB and that
+forwarder. The proxy sends up to 128 page writes before collecting exactly that
+many `OK` replies. The helper requests 8 MiB chunks, covering all 24,576 pages
+in the unchanged 384 MiB allocation. Only successfully negotiated no-ack mode
+and an observed target stop permit batching. The proxy refuses compression,
+preserves ordinary wire packets, follows debugserver's dummy-checksum policy
+after no-ack negotiation, and closes both connections on incomplete/unexpected
+replies, interrupts or timeouts. Local UUID/instruction/readiness checks and
+the native RX execution check are retained. A separate explicit Xcode fallback
+compares bounded tuned-bulk/page samples and chooses the observed faster serial
+method; it is not represented as a proven speed fix.
+
+Source review used the pinned
+[pymobiledevice3 debugserver implementation](https://github.com/doronz88/pymobiledevice3/blob/v11.55.1/pymobiledevice3/cli/developer/debugserver.py),
+[StikDebug's native 128-command batching](https://github.com/StikDebug/StikDebug/blob/f9c1f46fad389e6f46466777808eca99e9426c81/StikDebug/JSSupport/JSDebugSupport.swift#L89-L150),
+and [LLVM debugserver's RSP implementation](https://github.com/llvm/llvm-project/blob/main/lldb/tools/debugserver/source/RNBRemote.cpp).
+Mac dependencies installed successfully and helper Python/shell syntax compiled.
+No app source changed, so the existing signed app/IPA remains the build artifact;
+no rebuild or reinstall is required for this launcher change. **No batch-device
+timing, completed JIT initialization, or guest boot result is available.**
 
 VM deletion now has sidebar swipe/context and detail actions, named confirmation,
 strict library-directory/symlink validation, background removal and a native

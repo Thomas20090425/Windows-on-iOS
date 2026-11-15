@@ -111,6 +111,20 @@ rejects Xcode-managed profiles when forced into manual signing mode.
    ./scripts/launch_on_device.sh DEVICE_ID me.ammaar.windowsios distribution/WindowsiOS.app
    ```
 
+   The default Mac transport batches 128 JIT page writes before collecting
+   their replies. Its first launch installs pinned `pymobiledevice3==11.55.1`
+   dependencies in `work/mac-jit-venv`, without changing system Python or
+   requiring StikDebug. It uses a USB userspace developer tunnel and two
+   loopback-only connections. Keep the device connected, unlocked and trusted.
+   The launcher resolves the selected CoreDevice identifier to its hardware
+   UDID; it never picks another attached device automatically. If Xcode omits
+   that field, set `WINIOS_DEVICE_UDID` to the device's UDID from Xcode's Devices
+   window. Local setup can also be prepared separately without opening a device:
+
+   ```bash
+   ./scripts/prepare_mac_jit.sh
+   ```
+
    If you installed a Debug build from Xcode, supply that exact app instead:
 
    ```bash
@@ -130,18 +144,15 @@ rejects Xcode-managed profiles when forced into manual signing mode.
    normal Xcode session before using StikDebug. If StikDebug cannot open, the
    app reports that and points to the Mac helper.
 
-   **Measured Mac transport limitation:** this user's connection took 24.4 s
-   for only 316 serial page commands, projecting over 30 minutes. The sparse
-   Mac loop is therefore not a demonstrated startup improvement on that
-   connection. StikDebug is the more appropriate next path to evaluate: its
-   native preparation batches 128 commands before reading responses. Configure
-   the latest [official StikDebug release](https://github.com/StikDebug/StikDebug/releases/latest)
-   with its pairing file and LocalDevVPN first; then use WindowsiOS's **Enable
-   JIT on Device**, confirm **Enable and Run Script** if prompted, return to
-   WindowsiOS and tap Start. WindowsiOS passes its matching custom script
-   automatically. Stop the Mac debugger and fully close/reopen WindowsiOS
-   before switching helpers. This path's completion time and guest boot still
-   require device verification.
+   **Measured baseline:** this user's connection took 24.4 s for 316 serial
+   page commands, projecting over 30 minutes. The new Mac proxy owns its
+   connection and pipelines page commands rather than invoking LLDB once per
+   page. Its actual preparation time and guest boot remain device-unverified.
+   No fixed speedup is promised. The transport approach follows the batching
+   in [StikDebug's native preparation](https://github.com/StikDebug/StikDebug/blob/f9c1f46fad389e6f46466777808eca99e9426c81/StikDebug/JSSupport/JSDebugSupport.swift#L89-L150),
+   using [pymobiledevice3's loopback debugserver forwarding](https://github.com/doronz88/pymobiledevice3/blob/v11.55.1/pymobiledevice3/cli/developer/debugserver.py#L56-L99)
+   on the Mac. Stop an old launcher with Control-C and fully close WindowsiOS
+   before starting a fresh session with the updated command.
 
 7. The helper launches the app stopped and attaches to the **iPad process**.
    Select the machine and tap **Start Windows** on the iPad while the helper is
@@ -153,22 +164,33 @@ rejects Xcode-managed profiles when forced into manual signing mode.
 
    During JIT preparation, Terminal reports acknowledged pages, covered MiB,
    percentage, elapsed time and an ETA based on observed packet latency. The
-   default prepares every 16 KiB page using a one-byte debugger write, following
-   the upstream protocol. A 384 MiB region has 24,576 pages, so the data payload
-   is 24,576 bytes; the helper does not upload the entire region by default.
-   Every page must return exactly `OK`. The app's RX execution check is retained.
-   Serial debugger round trips still cost time; no fixed completion time is
-   guaranteed. The app stays paused during this stage. The
+   default prepares every 16 KiB page using a one-byte debugger write, in batches
+   of at most 128. A 384 MiB region has 24,576 pages, so the data payload is
+   24,576 bytes. Every page must return exactly `OK`. The proxy permits batching
+   only after successful no-ack negotiation and an observed target stop. It
+   refuses protocol compression to keep page acknowledgements inspectable;
+   interruptions, unexpected replies or timeouts close the connection. The
+   app's RX execution check is retained. The app stays paused during this stage. The
    helper disables external/background symbol lookup for its own LLDB session
    and uses a nearby UUID-matched local dSYM when available. No persistent
    debugger preferences are changed. A single blocked debugger operation can
    still delay progress output; unchanged counters for several minutes should
    not be treated as proof that Windows is booting.
 
-   For transport diagnostics only, `WINIOS_JIT_PREPARE=bulk` selects the older
-   full-region method with LLDB's explicit packet transfer size set to 131072.
-   This is opt-in: the user-observed former bulk rate projected about 22 minutes
-   for 384 MiB. Packet-size tuning has not been timed on this device.
+   If the USB tunnel cannot be established, the original Xcode transport is
+   available explicitly:
+
+   ```bash
+   WINIOS_JIT_TRANSPORT=xcode ./scripts/launch_on_device.sh DEVICE_ID me.ammaar.windowsios distribution/WindowsiOS.app
+   ```
+
+   This fallback defaults to a bounded comparison of 1 MiB tuned bulk writes
+   with eight serial page writes, then prepares the entire region with the
+   observed faster method. It remains serial and can still be slow. Within
+   that fallback, `WINIOS_JIT_PREPARE=pages` or `bulk` forces a method for
+   diagnostics. The old bulk baseline projected about 22 minutes; packet-size
+   tuning is not a demonstrated fix. A batch-transport failure never silently
+   falls back on a partially prepared session. Fully close the app before retrying.
 8. The firmware boots the ISO through the virtual USB mass-storage optical
    drive. Windows Setup uses the generated answer disk to partition the new
    Windows disk and install **image index 1**, the first Windows edition on the
