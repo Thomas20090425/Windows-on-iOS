@@ -93,17 +93,28 @@ rejects Xcode-managed profiles when forced into manual signing mode.
    Existing VMs and disks are not overwritten.
 5. Set the desired per-machine options before starting. Choose 4 GiB initially;
    4.25/4.5 GiB depend on both host admission and the JIT-time RAM reservation.
-6. To initialize the existing debugger-assisted JIT path, explicitly run:
+6. Initialize JIT using a compatible helper. **Xcode Run alone is not a JIT
+   helper.** A normal debug attachment now returns a setup message without
+   emitting custom allocation/probe breakpoint instructions. To use a Mac,
+   stop the ordinary Xcode debug session and explicitly run:
 
    ```bash
    ./scripts/launch_on_device.sh DEVICE_ID me.ammaar.windowsios
    ```
 
+   Alternatively, use **Enable JIT on Device** in the library/session with
+   StikDebug installed and configured. Return to WindowsiOS and tap Start after
+   the helper attaches. Only one debugger can own the process; detach/stop a
+   normal Xcode session before using StikDebug. If StikDebug cannot open, the
+   app reports that and points to the Mac helper.
+
 7. The helper launches the app stopped and attaches to the **iPad process**.
    Select the machine and tap **Start Windows** on the iPad while the helper is
    active. iPad JIT allocation waits until this selection, so the reservation
    uses that machine's memory setting. The helper services known JIT traps and
-   detaches; unknown stops are left stopped and reported as errors.
+   detaches; unknown stops are left stopped and reported as errors. Updated
+   helpers write and read back an explicit readiness word before resuming the
+   app. Keep the helper script and installed app from the same build.
 8. The firmware boots the ISO through the virtual USB mass-storage optical
    drive. Windows Setup uses the generated answer disk to partition the new
    Windows disk and install **image index 1**, the first Windows edition on the
@@ -150,6 +161,20 @@ workflows. They are not prerequisites for ISO setup inside the app. The optional
 does not invoke the old security-disabling `opt_hive_arm64.exe` helper. No
 performance benefit has been measured for that cleanup profile.
 
+## Delete an old virtual machine
+
+Swipe left on a VM in the library, long-press it, or use **Delete Virtual
+Machine…** in machine details. Confirm the named VM to remove its private
+disk, imported ISO copy, NVRAM and configuration. The original source ISO,
+other VMs, shared files and bundled firmware are kept. Removal runs in the
+background, with new starts and file operations held until it finishes.
+
+A running VM cannot be deleted. A stopped or failed VM whose engine still owns
+its disk handles is also protected; fully close and relaunch WindowsiOS first,
+then delete it. This avoids deleting storage still retained by the engine.
+An invalid `configuration.json` remains visible as an incomplete machine so it
+can be deleted through the same confirmation flow.
+
 ## Controls and configuration
 
 - Physical keyboard: HID key-down/up, modifiers, arrows, Escape, function keys
@@ -194,6 +219,8 @@ iPadOS may suspend or terminate the app. Keep it foregrounded while working.
 | --- | --- |
 | Cannot install | Rebuild with a matching development profile registering this iPad. |
 | Waiting for JIT | Run the device launch helper, then tap Start on the iPad. A signed app alone does not enable JIT. |
+| `EXC_BREAKPOINT` in `winios_brk.S` | The stopped instructions are the custom JIT protocol. Rebuild/reinstall the current app and use its matching helper. A normal Xcode Run attachment does not service that protocol; do not skip arbitrary breakpoint instructions. |
+| Delete unavailable | Stop the VM and relaunch the app to release retained engine state. Wait for imports/extraction/deletion to finish. |
 | JIT trap/allocation failure | Record the OS/model and helper error. This device/OS combination remains unsupported until verified. |
 | Insufficient reservation | Relaunch, select supported memory before Start, and initialize JIT again. No sub-4-GiB fallback is used. |
 | Missing bundled firmware | Rebuild/reinstall the app. Firmware preparation runs during the app build; no firmware picker is required. |

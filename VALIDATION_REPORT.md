@@ -3,7 +3,8 @@
 Date: **2026-11-15**, America/Toronto. Target: **Windows 11 24H2 ARM64**,
 confirmed by the user. Branch: `codex/ipad-24h2-build`.
 Initial universal-app implementation commit: `69b2e7e`. This report now covers
-the ISO-only setup correction `01b9340` and rebuilt artifacts.
+the ISO-only setup correction `01b9340`, startup/deletion correction `99dbef2`,
+and rebuilt artifacts.
 
 ## Verification scope
 
@@ -19,7 +20,8 @@ they do not validate the subsequently added app/device changes.
 | Deliverable/check | Result | Evidence and limit |
 | --- | --- | --- |
 | Native ARM64 iOS engine archive | **COMPILED** | `build/ios/libwinvm.a`, included in final signed app build. |
-| Universal Swift/Objective-C/native application | **COMPILED** | `build/logs/ios-app-build-iso-signed.log` ends with `BUILD SUCCEEDED`; includes ISO wizard, disk creation, FAT16 answer generator and USB optical transport. |
+| Universal Swift/Objective-C/native application | **COMPILED** | `build/logs/ios-app-build-jit-delete-signed.log` ends with `BUILD SUCCEEDED`; includes startup guard, deletion, ISO wizard and USB optical transport. |
+| Xcode Debug configuration | **COMPILED** | `build/logs/ios-app-build-jit-delete-debug.log` ends with `BUILD SUCCEEDED`; generic arm64 device build only, not app/debugger execution. |
 | iPad device-target compilation | **COMPILED** | Generic `iphoneos` arm64 build; bundled `UIDeviceFamily` includes 2. No device run. |
 | Duo/iPhone device-target compilation | **COMPILED** | Same universal arm64 artifact includes family 1; manual posture layout retained. Future hinge API excluded by SDK guard. No Duo run. |
 | iOS dependencies | **COMPILED** | libffi 3.5.0, GLib 2.83.0, libslirp 4.9.1 and linked dependency archives staged in `ios/deps/`. |
@@ -28,6 +30,7 @@ they do not validate the subsequently added app/device changes.
 | Bundled UEFI/variable template | **PACKAGED, HASHES CHECKED** | Matched 64 MiB `Firmware/code.fd` and `vars-template.fd` included in signed app. Pinned Debian EDK2 2025.02-8+deb13u1 package; manifest records hashes. Full licenses/provenance included. This proves packaged bytes, not firmware execution. |
 | Baseline core regressions | **PASSED BEFORE SCOPE CHANGE** | `build/logs/core-baseline.log`: classifier 43 cases, operands 36 cases, JIT 10 programs × 2 seeds, memory 12 programs × 3 modes + MMIO, MMU 76 checks, exceptions 53 checks; all reported zero failures. JIT-region baseline also completed. No rerun after source changes. |
 | New input/UI/config/lifecycle/storage tests | **NOT RUN — USER REQUEST** | Source and build checks only; no runtime assertions claimed. |
+| JIT helper correction and VM deletion | **COMPILED; NOT RUNTIME-TESTED** | Release/Debug compile; exported readiness word and exact assembly trap labels are present in the packaged Mach-O. Python/JavaScript helper syntax checks passed. No helper attachment or user VM deletion executed. |
 | Simulator UI checks | **NOT RUN — USER REQUEST** | Simulator compilation/execution is not native JIT verification. |
 | Physical installation | **NOT TESTED** | No suitable connected iPad/Duo; install script supplied but unexecuted. |
 | Device JIT initialization | **NOT TESTED** | Existing TXM trap protocol retained, selected-memory reservation added; no debugger attachment performed. |
@@ -46,7 +49,7 @@ No credentials or provisioning files were added to Git.
 IPA SHA-256:
 
 ```text
-75d99ae16d53456d616f73706743dc911fa64dc096283a4032cc116087465dde
+4452465386d9fbf19088ec8d4df720c2450d053c3fe0d39d6905cad333085211
 ```
 
 ## Build issues resolved
@@ -61,6 +64,28 @@ IPA SHA-256:
   automatic signing selected the eligible existing profile successfully.
 
 ## Delivered behavior and limits
+
+The user reported `Thread 1: EXC_BREAKPOINT` while starting a VM and identified
+`winios_brk.S` as the stopped source. Source inspection found that the prior
+allocator treated `CS_DEBUGGED` as sufficient to emit its custom JIT protocol
+traps. A normal Xcode Run debugger does not implement that protocol. The new
+allocator requires a process-local readiness handshake from the matching LLDB
+or StikDebug helper before emitting a probe, verifies the exact probe response,
+and narrows signal fallback to the expected trap instruction. No general
+breakpoint/Swift/host exception is skipped to make startup appear successful.
+The supplied numeric PC alone did not establish an ASLR-resolved symbol; the
+user's assembly source narrowed the diagnosis. Runtime reproduction was not
+performed. Apple's [trap exception documentation](https://developer.apple.com/documentation/xcode/sigtrap_sigill)
+also distinguishes debugger trap stops from other underlying runtime failures.
+
+VM deletion now has sidebar swipe/context and detail actions, named confirmation,
+strict library-directory/symlink validation, background removal and a native
+process-wide deletion reservation that blocks racing starts. Running machines
+and stopped/failed machines still owned by the engine cannot be deleted until
+app relaunch. Damaged configurations remain visible for deletion. Original ISO
+sources, other machines, shared files and bundled firmware are preserved by the
+deletion path. This is source/build evidence only; no existing user VM was
+deleted during implementation.
 
 Implemented the native iPad library/session, staged non-overwriting media
 imports, persistent validated configuration, hardware input, Pencil pointer

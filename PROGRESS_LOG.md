@@ -6,6 +6,8 @@ profiling or debugger use on this Mac. Later additions: Apple Pencil input and
 UTM-informed, engine-backed VM configuration.
 The user then corrected setup requirements: **Windows ISO only**, firmware
 bundled with the app, automatic private NVRAM, and app-created writable disks.
+The user subsequently reported a start-time `EXC_BREAKPOINT` in the JIT
+assembly and requested deletion of past VMs.
 
 ## Completed source work
 
@@ -30,6 +32,13 @@ bundled with the app, automatic private NVRAM, and app-created writable disks.
   partitioning, preserving existing installations.
 - Bundled matched EDK2 code/variable-template banks with pinned Debian package
   checksums, provenance and redistribution notices. No user firmware import.
+- Replaced the assumption that Xcode's debug attachment implies JIT support
+  with an explicit helper readiness handshake. Matching LLDB/StikDebug scripts
+  arm it before resuming, validate protocol responses and preserve unknown
+  stops. Ordinary Xcode Run now returns JIT setup status before emitting BRK.
+- Added iPad Enable JIT actions, visible helper-open errors and VM deletion
+  with confirmation, native ownership checks, strict directory validation and
+  a deletion reservation preventing new starts from racing removal.
 
 ## Build evidence and constraints
 
@@ -38,13 +47,16 @@ bundled with the app, automatic private NVRAM, and app-created writable disks.
 - Core baseline checks had completed before the user added the build-only
   constraint. No subsequent tests or runtime checks were performed.
 - Final integrated **signed build succeeded**; app, development IPA and manifest
-  are in `distribution/`. Final log: `build/logs/ios-app-build-iso-signed.log`.
+  are in `distribution/`. Final log: `build/logs/ios-app-build-jit-delete-signed.log`.
   Signature/package checks passed. Installation is limited to the embedded
   development profile's seven registered devices. Full evidence is in VALIDATION_REPORT.md.
 - Implementation milestone: `69b2e7e` — native iPad sessions, Pencil input and
   validated VM configuration, on `codex/ipad-24h2-build`.
 - ISO-only setup correction: `01b9340` — bundled UEFI, fresh NVRAM, app-created
   Windows disk, USB optical media and generated automatic setup answers.
+- Startup/deletion correction: `99dbef2` — helper handshake and guarded VM
+  deletion. Release and Debug arm64 configurations both compiled; helper syntax
+  checks and signature/package checks passed. No runtime checks or deletion ran.
 
 ## Remaining external/runtime work
 

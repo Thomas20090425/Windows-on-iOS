@@ -29,6 +29,11 @@ and generates removable unattended setup media. No firmware or variable-store
 import is required. Windows Setup/OOBE prompts and platform requirements still
 apply; this engine has no virtual TPM. See the installation guide for limits.
 
+JIT startup now requires an explicit readiness handshake from the supplied
+helper; ordinary Xcode Run displays setup status instead of emitting unhandled
+JIT breakpoints. Past VMs can be deleted with confirmation from the library.
+Running or engine-retained machines are protected until the app is relaunched.
+
 Use `JOBS=2 ./scripts/build_ios_app.sh` for a compile-only build. Add your
 `DEVELOPMENT_TEAM` for development signing. Outputs are in `distribution/`.
 See [iPad installation](IPAD_INSTALLATION.md), [verification evidence](VALIDATION_REPORT.md),
