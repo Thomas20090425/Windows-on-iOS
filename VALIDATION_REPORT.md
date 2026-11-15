@@ -33,7 +33,7 @@ they do not validate the subsequently added app/device changes.
 | JIT helper correction and VM deletion | **COMPILED; NOT RUNTIME-TESTED** | Release/Debug compile; exported readiness word and exact assembly trap labels are present in the packaged Mach-O. Python/JavaScript helper syntax checks passed. No helper attachment or user VM deletion executed. |
 | Local symbols for device launcher | **METADATA PREPARED; NOT DEVICE-TESTED** | `build/jit-symbols-release.json` and `build/jit-symbols-debug.json` record Mach-O UUIDs/addresses from the local products, including the Debug dylib. Python/shell syntax compilation passed. No LLDB process was launched during this correction. |
 | Serial JIT preparation baseline | **USER-TIMED; TOO SLOW ON THIS CONNECTION** | Bulk: 21 MiB/72.9 s projects 22.2 minutes. Serial sparse: 316/24,576 pages in 24.4 s projects about 31.6 minutes. Smaller payload did not overcome per-command cost. Neither log reaches completed JIT preparation. |
-| Mac JIT batch transport | **SYNTAX COMPILED; NOT DEVICE-TIMED** | Default launcher now uses an owned loopback RSP proxy and pinned pymobiledevice3 USB forwarder, with up to 128 page commands in flight. Python/shell syntax compilation and source review only. Dependencies installed in isolated `work/mac-jit-venv`; no tunnel, debugger, device or VM run by the agent. |
+| Mac JIT batch transport | **USER CONNECTED; ATTACH ORDER CORRECTED; NOT DEVICE-TIMED** | User log reaches successful no-ack negotiation, then stalls in synchronous `process connect` before attachment. Corrected to asynchronous connection, bounded connected-state wait, synchronous exact-PID attachment and a 60 s startup watchdog. Python/shell syntax compilation and source review only for the correction. No tunnel, debugger, device or VM run by the agent. |
 | Simulator UI checks | **NOT RUN — USER REQUEST** | Simulator compilation/execution is not native JIT verification. |
 | Physical installation | **USER-REPORTED LAUNCH; NOT AGENT-TESTED** | User supplied devicectl output showing bundle `me.ammaar.windowsios` launched on device with PID 2377. Its precise build UUID was not logged. No installation or device launch executed by the agent. |
 | Device JIT initialization | **PARTIAL USER-REPORTED EVIDENCE** | Latest supplied log shows helper readiness write/read-back, successful probe reply and allocation of 384 MiB RX memory at `0x1045e8000`. It does not show completed page preparation, RX execution self-check or helper detach. No debugger attachment performed by the agent. |
@@ -169,6 +169,20 @@ Mac dependencies installed successfully and helper Python/shell syntax compiled.
 No app source changed, so the existing signed app/IPA remains the build artifact;
 no rebuild or reinstall is required for this launcher change. **No batch-device
 timing, completed JIT initialization, or guest boot result is available.**
+
+The next user log reached the USB forwarder and successful no-ack negotiation,
+then stopped at `process connect`. Source review identified a launcher deadlock:
+with synchronous debugger execution, LLDB's
+[Platform connection path](https://github.com/llvm/llvm-project/blob/main/lldb/source/Target/Platform.cpp)
+waits indefinitely for a process stop, while an unattached debugserver reports
+`eStateConnected` until the subsequent attach request. The updated command uses
+asynchronous connection only, consumes state events until `eStateConnected`
+(bounded to 10 s), restores synchronous execution, attaches the known PID and
+requires its stopped state. A parent 60 s connection/attach watchdog covers
+blocking remote operations; it ends once attachment is verified and does not
+limit the user's later VM selection. Python/shell syntax compilation and
+independent source review passed. No runtime validation of this correction
+was performed; no native app source/artifact changed.
 
 VM deletion now has sidebar swipe/context and detail actions, named confirmation,
 strict library-directory/symlink validation, background removal and a native

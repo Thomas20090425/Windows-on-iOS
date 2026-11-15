@@ -125,6 +125,16 @@ rejects Xcode-managed profiles when forced into manual signing mode.
    ./scripts/prepare_mac_jit.sh
    ```
 
+   The launcher connects to the fresh debugproxy asynchronously, waits for its
+   connected state, then attaches synchronously to the exact launched PID.
+   Startup connection/attachment is limited to 60 seconds and prints each
+   phase. Once attached, it waits for you to choose a VM and tap Start without
+   that startup deadline. A previous launcher could stall at `process connect`
+   after no-ack negotiation because it waited for a process stop before the
+   attach request was sent. Updating the Mac scripts fixes that ordering; no
+   app rebuild or reinstall is required. Stop the old launcher and fully close
+   WindowsiOS before retrying.
+
    If you installed a Debug build from Xcode, supply that exact app instead:
 
    ```bash

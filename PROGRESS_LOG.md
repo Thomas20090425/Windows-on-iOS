@@ -105,6 +105,12 @@ was advancing slowly, projecting 22.2 minutes at that measured rate.
   Python/shell syntax compilation and independent source review. No debugger,
   device tunnel, VM, or test workload was run. No native app source changed;
   the existing signed app remains applicable. New batch timing remains unverified.
+- Follow-up user output reached batch-proxy no-ack negotiation but stalled in
+  synchronous `process connect` before attachment. Corrected that LLDB deadlock
+  with asynchronous connection, a bounded connected-state wait, synchronous
+  exact-PID attach, stopped-state verification and a 60 s startup watchdog.
+  Python/shell syntax compilation and independent source review passed. No app
+  rebuild, debugger/device execution or runtime tests were performed.
 
 ## Remaining external/runtime work
 

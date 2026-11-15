@@ -40,6 +40,54 @@ def configure_symbol_lookup(debugger):
         print("[txm-jit] This LLDB lacks symbols.auto-download; external/background lookup is disabled", flush=True)
 
 
+def attach_txm_proxy(debugger, command, exe_ctx, result, internal_dict):
+    """Connect to an unattached loopback debugproxy, then attach the known PID.
+
+    Synchronous `process connect` waits for a stopped process indefinitely.
+    A fresh debugserver has no process until the subsequent attach request,
+    so only the connection step must use asynchronous debugger execution.
+    """
+    try:
+        fields = command.split()
+        if len(fields) != 2 or not all(re.fullmatch(r"[0-9]+", field) for field in fields):
+            raise RuntimeError("Usage: txm_jit_attach LOOPBACK_PORT PID")
+        port, pid = map(int, fields)
+        if not 0 < port <= 65535 or pid <= 0:
+            raise RuntimeError("Invalid loopback port or process identifier")
+        print(f"[mac-jit] Connecting to debugproxy for PID {pid}", flush=True)
+        debugger.SetAsync(True)
+        run_cmd(debugger, f"process connect connect://127.0.0.1:{port}")
+        deadline = time.monotonic() + 10
+        listener, event = debugger.GetListener(), lldb.SBEvent()
+        while True:
+            process = debugger.GetSelectedTarget().GetProcess()
+            state = process.GetState() if process.IsValid() else lldb.eStateInvalid
+            if state == lldb.eStateConnected:
+                break
+            if state in (lldb.eStateExited, lldb.eStateDetached, lldb.eStateCrashed, lldb.eStateStopped):
+                raise RuntimeError(f"Expected an unattached debugproxy, got process state {state}")
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Debugproxy did not reach the connected state within 10 seconds")
+            # Consuming the state event also lets LLDB publish eStateConnected
+            # before Target::Attach decides whether to reuse this connection.
+            listener.WaitForEvent(1, event)
+        debugger.SetAsync(False)
+        print(f"[mac-jit] Debugproxy connected; attaching to PID {pid}", flush=True)
+        run_cmd(debugger, f"process attach --pid {pid}")
+        process = debugger.GetSelectedTarget().GetProcess()
+        if (not process.IsValid() or process.GetProcessID() != pid or
+                process.GetState() != lldb.eStateStopped):
+            raise RuntimeError(f"Attachment did not produce the expected stopped PID {pid}")
+        marker = os.environ.get("WINIOS_JIT_ATTACHED_FILE")
+        if marker:
+            Path(marker).write_text(str(pid))
+        print(f"[mac-jit] Attached to stopped PID {pid}; preparing the JIT helper", flush=True)
+    except Exception as error:
+        result.SetError(str(error))
+    finally:
+        debugger.SetAsync(False)
+
+
 def write_reg(debugger, process, thread, reg_name: str, val_int: int):
     process.SetSelectedThread(thread)
     frame = thread.GetFrameAtIndex(0)
@@ -555,4 +603,5 @@ def txm_jit_cmd(debugger, command, exe_ctx, result, internal_dict):
 
 
 def __lldb_init_module(debugger, internal_dict):
+    debugger.HandleCommand("command script add -f _lldb_txm_jit.attach_txm_proxy txm_jit_attach")
     debugger.HandleCommand("command script add -f _lldb_txm_jit.txm_jit_cmd txm_jit_run")

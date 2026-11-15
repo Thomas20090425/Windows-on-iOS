@@ -188,6 +188,7 @@ def main():
             if not isinstance(port, int) or not 0 < port <= 65535:
                 raise RuntimeError("Invalid batch proxy port")
             commands = directory / "launch.lldb"
+            attached = directory / "attached-pid"
             commands.write_text("\n".join([
                 "script lldb.debugger.SetAsync(False)",
                 "command script import " + lldb_quote(ROOT / "scripts" / "_lldb_txm_jit.py"),
@@ -195,21 +196,25 @@ def main():
                 "settings set plugin.process.gdb-remote.packet-timeout 300",
                 "platform select remote-ios",
                 "target create " + lldb_quote(executable),
-                f"process connect connect://127.0.0.1:{port}",
-                f"process attach --pid {args.pid}",
+                f"txm_jit_attach {port} {args.pid}",
                 "txm_jit_run",
                 "",
             ]))
             environment = os.environ.copy()
             environment["WINIOS_JIT_PREPARE"] = "proxy"
+            environment["WINIOS_JIT_ATTACHED_FILE"] = str(attached)
             environment["PYTHONPATH"] = str(ROOT / "scripts")
             print("[mac-jit] Attaching LLDB. Select a VM and Start; preparation will batch 128 page writes.", flush=True)
             debugger = subprocess.Popen(["xcrun", "lldb", "-b", "-s", str(commands)], env=environment)
+            attach_deadline = time.monotonic() + 60
             while debugger.poll() is None:
                 if forwarder.poll() is not None:
                     raise RuntimeError(f"USB debugproxy disconnected; see {log_path}")
                 if proxy.poll() not in (None, 0):
                     raise RuntimeError("Mac batch proxy aborted; see the protocol error above. "
+                                       "Fully close WindowsiOS before retrying.")
+                if not attached.exists() and time.monotonic() >= attach_deadline:
+                    raise RuntimeError("Debugger connection/attachment exceeded 60 seconds; stopping the launcher. "
                                        "Fully close WindowsiOS before retrying.")
                 # The proxy normally exits as LLDB disconnects after detach.
                 # Let LLDB report its own connection/protocol errors.
