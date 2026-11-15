@@ -385,6 +385,39 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     return attrs && [attrs fileSize] >= (64ull << 20);
 }
 
+- (NSString *)firmwarePathForDirectory:(NSString *)directory {
+    NSString *legacy = [directory stringByAppendingPathComponent:@"code.fd"];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:legacy]) return legacy;
+    return [NSBundle.mainBundle pathForResource:@"code" ofType:@"fd" inDirectory:@"Firmware"];
+}
+
+- (BOOL)shouldAttachAutomaticAnswersInDirectory:(NSString *)directory {
+    NSString *markerPath = [directory stringByAppendingPathComponent:@"installation-created.json"];
+    NSData *markerData = [NSData dataWithContentsOfFile:markerPath];
+    NSDictionary *marker = markerData ? [NSJSONSerialization JSONObjectWithData:markerData options:0 error:nil] : nil;
+    if (![marker isKindOfClass:NSDictionary.class] || ![marker[@"target"] isEqual:@"windows11.img"] ||
+        ![marker[@"diskSizeGiB"] isKindOfClass:NSNumber.class]) return NO;
+    uint64_t capacity = [marker[@"diskSizeGiB"] unsignedLongLongValue];
+    if (capacity < 64 || capacity > 512) return NO;
+    NSString *disk = [directory stringByAppendingPathComponent:@"windows11.img"];
+    int fd = open(disk.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) return NO;
+    struct stat st;
+    BOOL blank = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && (uint64_t)st.st_size == (capacity << 30);
+    /* Never present the formatting answer to a partitioned or previously used
+     * VM. Only the freshly created, app-marked sparse target qualifies. */
+    uint8_t buffer[65536];
+    for (int end = 0; end < 2 && blank; end++) {
+        uint64_t base = end ? (uint64_t)st.st_size - (1u << 20) : 0;
+        for (uint64_t offset = 0; offset < (1u << 20) && blank; offset += sizeof buffer) {
+            if (pread(fd, buffer, sizeof buffer, (off_t)(base + offset)) != sizeof buffer) { blank = NO; break; }
+            for (size_t i = 0; i < sizeof buffer; i++) if (buffer[i]) { blank = NO; break; }
+        }
+    }
+    close(fd);
+    return blank;
+}
+
 - (BOOL)needsSparseUnpack {
     NSString *dir = [self machineDirectory];
     /* An existing writable image always wins; never replace a user's disk. */
@@ -396,7 +429,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 - (BOOL)hasProvisionedMachine {
     NSString *dir = [self machineDirectory];
     NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"code.fd"]]) return NO;
+    if (![self firmwarePathForDirectory:dir]) return NO;
     if (![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"vars.fd"]]) return NO;
     return [self hasRawDiskImageAt:dir] || [self needsSparseUnpack];
 }
@@ -450,7 +483,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     }
 
     if (![self hasProvisionedMachine]) {
-        _vmStatus = @"Place code.fd, vars.fd, and windows11.hvsparse in Documents/Machines/Win11";
+        _vmStatus = @"Create a machine from a Windows 11 ARM64 ISO in the library. Firmware and the writable disk are prepared by the app.";
         dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
         [self notifyChanged];
         return;
@@ -529,11 +562,16 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     NSString *shareSock = [rawTmp stringByAppendingPathComponent:@"s"];
     unlink(shareSock.fileSystemRepresentation);
 
-    NSString *codePath = [dir stringByAppendingPathComponent:@"code.fd"];
+    NSString *codePath = [self firmwarePathForDirectory:dir];
     NSString *varsPath = [dir stringByAppendingPathComponent:@"vars.fd"];
     NSString *diskPath = [dir stringByAppendingPathComponent:@"windows11.img"];
     NSString *secondaryDisk = [dir stringByAppendingPathComponent:@"secondary.img"];
     BOOL hasSecondaryDisk = [[NSFileManager defaultManager] fileExistsAtPath:secondaryDisk];
+    NSString *installerISO = [dir stringByAppendingPathComponent:@"installer.iso"];
+    BOOL hasInstallerISO = [[NSFileManager defaultManager] fileExistsAtPath:installerISO];
+    NSString *answerDisk = [dir stringByAppendingPathComponent:@"setup-support.img"];
+    BOOL attachAnswers = hasInstallerISO && !hasSecondaryDisk && !_primaryDiskReadOnly &&
+        [self shouldAttachAutomaticAnswersInDirectory:dir] && [[NSFileManager defaultManager] fileExistsAtPath:answerDisk];
 
     _configuredRamMB = ramMB;
     _configuredCPUs = _requestedCPUs;
@@ -560,6 +598,8 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         .display_refresh_hz = _displayRefreshRate,
         .tcp_forward_host_port = _tcpForwardHostPort,
         .tcp_forward_guest_port = _tcpForwardGuestPort,
+        .installer_iso = hasInstallerISO ? installerISO.fileSystemRepresentation : NULL,
+        .installer_answer_disk = attachAnswers ? answerDisk.fileSystemRepresentation : NULL,
     };
 
     char err[256] = {0};

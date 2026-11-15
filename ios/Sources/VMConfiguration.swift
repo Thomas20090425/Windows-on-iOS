@@ -18,6 +18,8 @@ struct VMConfiguration: Codable, Equatable {
     var touchTrackpad: Bool = false
     var commandToControl: Bool = false
     var pointerSensitivity: Double = 1
+    var diskSizeGiB: Int = 64
+    var installationISO: String?
 
     init(name: String = "Windows 11 ARM64") { self.name = name }
 
@@ -26,6 +28,7 @@ struct VMConfiguration: Codable, Equatable {
         case primaryDiskReadOnly, sharedFolderEnabled, microphoneEnabled, displayRefreshRate
         case diagnosticLogging, tcpForwardHostPort, tcpForwardGuestPort
         case touchTrackpad, commandToControl, pointerSensitivity
+        case diskSizeGiB, installationISO
     }
 
     /// Each added option has a default so existing machine configurations remain readable.
@@ -47,6 +50,8 @@ struct VMConfiguration: Codable, Equatable {
         touchTrackpad = try values.decodeIfPresent(Bool.self, forKey: .touchTrackpad) ?? touchTrackpad
         commandToControl = try values.decodeIfPresent(Bool.self, forKey: .commandToControl) ?? commandToControl
         pointerSensitivity = try values.decodeIfPresent(Double.self, forKey: .pointerSensitivity) ?? pointerSensitivity
+        diskSizeGiB = try values.decodeIfPresent(Int.self, forKey: .diskSizeGiB) ?? diskSizeGiB
+        installationISO = try values.decodeIfPresent(String.self, forKey: .installationISO)
     }
 
     var runtimeOptions: [String: NSNumber] {
@@ -63,7 +68,9 @@ struct VMConfiguration: Codable, Equatable {
         let validForward = (1024...65535).contains(tcpForwardHostPort) && (1...65535).contains(tcpForwardGuestPort)
         guard (1...4).contains(cpuCount), [4096, 4352, 4608].contains(memoryMB),
               [30, 60, 120].contains(displayRefreshRate), pointerSensitivity.isFinite,
-              (0.25...3).contains(pointerSensitivity), noForward || validForward else {
+              (0.25...3).contains(pointerSensitivity), (64...512).contains(diskSizeGiB),
+              installationISO == nil || installationISO == "installer.iso", installationISO == nil || !primaryDiskReadOnly,
+              noForward || validForward else {
             throw VMLibraryError.invalidConfiguration
         }
         return self
@@ -76,25 +83,22 @@ struct VMMachine: Identifiable, Equatable {
     var storedBytes: Int64
     var missingFiles: [String]
     var hasSecondaryDisk: Bool
+    var hasInstallerISO: Bool
     var id: String { directory.path }
     var isReady: Bool { missingFiles.isEmpty }
 }
 
 enum VMMediaKind: String, CaseIterable, Identifiable {
-    case firmware, variables, disk, secondaryDisk
+    case disk, secondaryDisk
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .firmware: return "UEFI firmware (code.fd)"
-        case .variables: return "UEFI variable store (vars.fd)"
         case .disk: return "Prepared Windows disk (.img or .hvsparse)"
         case .secondaryDisk: return "Optional read-only secondary disk (.img or .raw)"
         }
     }
     var filename: String {
         switch self {
-        case .firmware: return "code.fd"
-        case .variables: return "vars.fd"
         case .disk: return "windows11.img"
         case .secondaryDisk: return "secondary.img"
         }
@@ -103,6 +107,7 @@ enum VMMediaKind: String, CaseIterable, Identifiable {
 
 enum VMLibraryError: LocalizedError {
     case invalidName, invalidConfiguration, invalidMedia(String), alreadyExists(String), invalidDirectory
+    case missingBundledFirmware, insufficientStorage(required: Int64, available: Int64), cannotCreateDisk
     var errorDescription: String? {
         switch self {
         case .invalidName: return "Enter a machine name between 1 and 100 characters."
@@ -110,6 +115,12 @@ enum VMLibraryError: LocalizedError {
         case .invalidMedia(let reason): return reason
         case .alreadyExists(let file): return "\(file) already exists. Import into a new machine to preserve existing data."
         case .invalidDirectory: return "The machine must be inside Documents/Machines."
+        case .missingBundledFirmware: return "This app build is missing its bundled UEFI firmware. Rebuild or reinstall WindowsiOS; no firmware import is required."
+        case .insufficientStorage(let required, let available):
+            let formatter = ByteCountFormatter()
+            formatter.countStyle = .file
+            return "Windows setup needs at least \(formatter.string(fromByteCount: required)) free for the ISO copy and installation headroom. Available: \(formatter.string(fromByteCount: available))."
+        case .cannotCreateDisk: return "The app could not create the Windows virtual disk. Check available iPad storage."
         }
     }
 }
@@ -154,13 +165,15 @@ struct VMLibraryFiles {
         } else { configuration = VMConfiguration(name: directory.lastPathComponent == "Win11" ? "Windows 11 ARM64" : directory.lastPathComponent) }
         let names = try manager.contentsOfDirectory(atPath: directory.path)
         var missing = [String]()
-        for name in ["code.fd", "vars.fd"] where !names.contains(name) { missing.append(name) }
+        if !names.contains("code.fd") && VMBundledFirmware.codeURL == nil { missing.append("bundled UEFI firmware") }
+        if !names.contains("vars.fd") { missing.append("automatic firmware initialization") }
         if !names.contains("windows11.img") && !names.contains("windows11.hvsparse") { missing.append("windows11.img or windows11.hvsparse") }
+        if configuration.installationISO != nil && !names.contains("installer.iso") { missing.append("Windows installation ISO") }
         var stored: Int64 = 0
         for file in try manager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileAllocatedSizeKey], options: [.skipsHiddenFiles]) {
             stored += Int64((try? file.resourceValues(forKeys: [.fileAllocatedSizeKey]).fileAllocatedSize) ?? 0)
         }
-        return VMMachine(directory: directory, configuration: configuration, storedBytes: stored, missingFiles: missing, hasSecondaryDisk: names.contains("secondary.img"))
+        return VMMachine(directory: directory, configuration: configuration, storedBytes: stored, missingFiles: missing, hasSecondaryDisk: names.contains("secondary.img"), hasInstallerISO: names.contains("installer.iso"))
     }
 
     /// Copy into a private staging path and rename only after complete validation. Never replace media.

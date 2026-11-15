@@ -14,6 +14,7 @@ mkdir -p "$DIST_DIR" "$ROOT/build/logs"
 for tool in xcodegen xcrun make; do
     command -v "$tool" >/dev/null || { echo "Missing prerequisite: $tool" >&2; exit 1; }
 done
+python3 "$ROOT/scripts/prepare_firmware.py"
 if [[ ! -f "$ROOT/ios/deps/lib/libslirp.a" ]]; then
     JOBS="$JOBS" "$ROOT/scripts/build_ios_deps.sh"
 fi
@@ -72,6 +73,14 @@ manifest = {
     'signing': 'development' if profile.exists() else 'unsigned',
     'runtime_validation': 'NOT RUN: compilation and packaging only',
 }
+firmware = app / 'Firmware' / 'provenance.json'
+if firmware.exists():
+    firmware_info = json.loads(firmware.read_text())
+    manifest['bundled_firmware_package'] = firmware_info['package_version']
+    manifest['bundled_firmware_package_sha256'] = firmware_info['package_sha256']
+    manifest['bundled_firmware_files_sha256'] = firmware_info['files_sha256']
+else:
+    raise SystemExit('Built app is missing bundled UEFI firmware provenance')
 if profile.exists():
     payload = subprocess.check_output(['security', 'cms', '-D', '-i', str(profile)], stderr=subprocess.DEVNULL)
     provisioning = plistlib.loads(payload)

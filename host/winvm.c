@@ -28,6 +28,8 @@ static int ncpus = 1;
 static HvWinVirt board;
 static HvDisk disk0 = {.fd = -1};
 static HvDisk disk1 = {.fd = -1};
+static HvDisk installer_iso = {.fd = -1};
+static HvDisk installer_answer = {.fd = -1};
 static int net_on;
 static int share_on;
 static _Atomic int stop_requested;
@@ -168,6 +170,15 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
             return fail(err, errlen, "Cannot open secondary/installer disk image.");
         d1_ptr = &disk1;
     }
+    if (c->installer_iso && *c->installer_iso) {
+        if (hv_disk_open(&installer_iso, c->installer_iso, 0, 1) != 0 ||
+            installer_iso.size < 32768 || (installer_iso.size % 2048) != 0)
+            return fail(err, errlen, "Cannot open the Windows installation ISO as a read-only optical image.");
+        if (c->installer_answer_disk && *c->installer_answer_disk &&
+            (hv_disk_open(&installer_answer, c->installer_answer_disk, 0, 1) != 0 ||
+             installer_answer.size < 512 || installer_answer.size % 512 != 0))
+            return fail(err, errlen, "Cannot open the app-created setup answer disk.");
+    }
 
     size_t jit = c->jit_bytes ? c->jit_bytes : ((size_t)768 << 20);
     int r = c->jit_rx ? hv_machine_init_jit(&m, c->jit_rx, c->jit_rw, jit) : hv_machine_init(&m, jit);
@@ -191,6 +202,8 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
         return fail(err, errlen, "Cannot create virtual ARM64 Windows board (insufficient RAM or missing firmware).");
     }
     hv_winvirt_reset_cpu(&board);
+    if (installer_iso.fd >= 0 && board.usb)
+        hv_xhci_attach_installer(board.usb, &installer_iso, installer_answer.fd >= 0 ? &installer_answer : NULL);
     if (board.fb) board.fb->presentation_hz = c->display_refresh_hz == 30 || c->display_refresh_hz == 120 ? c->display_refresh_hz : 60;
     hv_audio_set_microphone_enabled(!c->disable_microphone);
 
@@ -277,6 +290,15 @@ int hv_winvm_run_cpu0(void) {
         if (cpus[0].halted == 2 && !atomic_load(&stop_requested)) {
             fprintf(stderr, "winvm: guest requested PSCI SYSTEM_RESET — rebooting...\n");
             join_secondaries();
+            /* Unattended disk partitioning is authorized only for the fresh
+             * app-created target. Once any boot-sector data exists, remove
+             * the answer LUN before firmware re-enumeration on warm reset. */
+            if (board.usb && installer_answer.fd >= 0) {
+                uint8_t sector[512];
+                int changed = hv_disk_read(&disk0, 0, sector, sizeof sector) != 0;
+                if (!changed) for (size_t i = 0; i < sizeof sector; i++) if (sector[i]) { changed = 1; break; }
+                if (changed) hv_xhci_remove_installer_answer(board.usb);
+            }
             /* Reset GIC, ITS, PCIe, and pflash state for warm reboot */
             if (board.gic) {
                 pthread_mutex_lock(&board.gic->mu);

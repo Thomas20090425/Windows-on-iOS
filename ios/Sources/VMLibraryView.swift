@@ -9,6 +9,7 @@ final class VMLibraryStore: ObservableObject {
     @Published var machines: [VMMachine] = []
     @Published var errorMessage: String?
     @Published var isImporting = false
+    @Published var importStatus = "Copying media… Keep WindowsiOS open."
     let files: VMLibraryFiles
 
     init() {
@@ -29,6 +30,27 @@ final class VMLibraryStore: ObservableObject {
         } catch { errorMessage = error.localizedDescription; return nil }
     }
 
+    func createFromISO(name: String, diskSizeGiB: Int, iso: URL, completion: @escaping (String?) -> Void) {
+        guard !isImporting else { return }
+        isImporting = true
+        importStatus = "Importing the Windows ISO and creating your virtual disk… Keep WindowsiOS open."
+        let files = self.files
+        Task {
+            let result = await Task.detached(priority: .utility) { () -> (String?, String?) in
+                let scoped = iso.startAccessingSecurityScopedResource()
+                defer { if scoped { iso.stopAccessingSecurityScopedResource() } }
+                do {
+                    let machine = try files.createFromISO(name: name, diskSizeGiB: diskSizeGiB, iso: iso)
+                    return (machine.id, nil)
+                } catch { return (nil, error.localizedDescription) }
+            }.value
+            isImporting = false
+            if let error = result.1 { errorMessage = error }
+            refresh()
+            completion(result.0)
+        }
+    }
+
     func save(_ configuration: VMConfiguration, machine: VMMachine) {
         do { try files.save(configuration, in: machine.directory); refresh() }
         catch { errorMessage = error.localizedDescription }
@@ -37,6 +59,7 @@ final class VMLibraryStore: ObservableObject {
     func importMedia(url: URL, kind: VMMediaKind, machine: VMMachine) {
         guard !isImporting else { return }
         isImporting = true
+        importStatus = "Copying media… Keep WindowsiOS open."
         let files = self.files
         Task {
             let failure = await Task.detached(priority: .utility) { () -> String? in
@@ -56,7 +79,6 @@ struct VMLibraryView: View {
     @ObservedObject var vm: VMViewModel
     @StateObject private var library = VMLibraryStore()
     @State private var selectedID: String?
-    @State private var newMachineName = "Windows 11 ARM64"
     @State private var creatingMachine = false
     @State private var importKind = VMMediaKind.disk
     @State private var importing = false
@@ -72,7 +94,7 @@ struct VMLibraryView: View {
                     Label {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(machine.configuration.name)
-                            Text(machine.isReady ? "Media imported" : "Media required")
+                            Text(machine.isReady ? (machine.hasInstallerISO ? "Windows ISO attached" : "Ready") : "Setup incomplete")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     } icon: { Image(systemName: "desktopcomputer") }
@@ -82,7 +104,7 @@ struct VMLibraryView: View {
             .navigationTitle("Virtual Machines")
             .overlay {
                 if library.machines.isEmpty {
-                    ContentUnavailableView("Your Windows machines", systemImage: "desktopcomputer", description: Text("Create a machine, then import prepared Windows 11 ARM64 media and EDK2 firmware."))
+                    ContentUnavailableView("Your Windows machines", systemImage: "desktopcomputer", description: Text("Import a Windows 11 ARM64 ISO. WindowsiOS includes the firmware and creates the Windows disk on your iPad."))
                 }
             }
             .toolbar {
@@ -101,13 +123,21 @@ struct VMLibraryView: View {
                 ContentUnavailableView("Select a virtual machine", systemImage: "desktopcomputer", description: Text("Windows runs locally using the existing ARM64 translation engine. A debugger-assisted JIT launch is required."))
             }
         }
+        .overlay {
+            if library.isImporting {
+                ProgressView(library.importStatus)
+                    .padding(24).frame(maxWidth: 420)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                    .padding()
+            }
+        }
         .task { library.refresh(); selectedID = library.machines.first?.id }
-        .alert("New virtual machine", isPresented: $creatingMachine) {
-            TextField("Name", text: $newMachineName)
-            Button("Create") { selectedID = library.create(name: newMachineName)?.id }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This creates an empty configuration. Supply your own licensed Windows installation and firmware.")
+        .sheet(isPresented: $creatingMachine) {
+            NewWindowsMachineView { name, diskSizeGiB, iso in
+                library.createFromISO(name: name, diskSizeGiB: diskSizeGiB, iso: iso) { identifier in
+                    if let identifier { selectedID = identifier }
+                }
+            }
         }
         .alert("Virtual machine", isPresented: Binding(get: { library.errorMessage != nil }, set: { if !$0 { library.errorMessage = nil } })) {
             Button("OK") { library.errorMessage = nil }
@@ -133,6 +163,11 @@ struct VMLibraryView: View {
             Section {
                 Label(machine.configuration.name, systemImage: "desktopcomputer")
                     .font(.title2)
+                LabeledContent("Windows installation ISO", value: machine.hasInstallerISO ? "Imported" : "Not attached")
+                LabeledContent("Firmware", value: FileManager.default.fileExists(atPath: machine.directory.appendingPathComponent("code.fd").path) ? "Machine firmware" : "Included with WindowsiOS")
+                if machine.configuration.installationISO != nil {
+                    LabeledContent("Virtual disk capacity", value: "\(machine.configuration.diskSizeGiB) GiB")
+                }
                 LabeledContent("Secondary disk", value: machine.hasSecondaryDisk ? "Imported (read-only)" : "None")
                 LabeledContent("Stored on device", value: ByteCountFormatter.string(fromByteCount: machine.storedBytes, countStyle: .file))
                 Text(machine.directory.lastPathComponent).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
@@ -140,7 +175,7 @@ struct VMLibraryView: View {
                     Text("Required: \(machine.missingFiles.joined(separator: ", "))")
                         .foregroundStyle(.orange)
                 }
-                if library.isImporting { ProgressView("Copying media… Keep WindowsiOS open.") }
+                if library.isImporting { ProgressView(library.importStatus) }
             }
             Section("Windows session") {
                 Button(vm.isVMRunning ? "Return to Windows" : "Start Windows", systemImage: "play.fill") { launch(machine) }
@@ -156,15 +191,21 @@ struct VMLibraryView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            Section("Import media") {
-                ForEach(VMMediaKind.allCases) { kind in
-                    Button(kind.title, systemImage: "square.and.arrow.down") { importKind = kind; importing = true }
-                        .disabled(vm.isVMRunning || vm.isUnpacking || library.isImporting)
+            Section("Windows setup") {
+                Text("For a new installation, supply only your Windows 11 ARM64 ISO. The app supplies UEFI firmware, creates a private variable store and creates the writable Windows disk on your iPad.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if machine.hasInstallerISO {
+                    Text("Windows setup installs the first Windows edition included in the ISO onto this machine's new disk. Windows may ask for license, region or account details inside the guest.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("Files are copied into this machine. Existing firmware, NVRAM and disks are never replaced. Import a prepared raw Windows disk or an HVSPARSE archive, not an installer ISO.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text("To manage or export files, open Files → On My iPad → WindowsiOS → Machines. Use a separate machine when importing replacement media.")
-                    .font(.caption).foregroundStyle(.secondary)
+                DisclosureGroup("Advanced disk import") {
+                    ForEach(machine.hasInstallerISO ? [] : VMMediaKind.allCases) { kind in
+                        Button(kind.title, systemImage: "square.and.arrow.down") { importKind = kind; importing = true }
+                            .disabled(vm.isVMRunning || vm.isUnpacking || library.isImporting)
+                    }
+                    Text(machine.hasInstallerISO ? "Automatic setup manages this machine's disks. Create a separate machine to install from another ISO." : "For existing installations only. Existing disks are never replaced; create a separate machine to install from another ISO.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             VMConfigurationFields(configuration: Binding(get: {
                 library.machines.first(where: { $0.id == machine.id })?.configuration ?? machine.configuration
@@ -172,7 +213,7 @@ struct VMLibraryView: View {
             .id(machine.id)
             .disabled(vm.isVMRunning || vm.isUnpacking || library.isImporting)
             Section("Storage and setup") {
-                Text("Finder file sharing also supports Documents/Machines/Win11 with code.fd, vars.fd and windows11.img or windows11.hvsparse. Use the IPAD_INSTALLATION.md instructions to prepare media on a Mac.")
+                Text("The virtual disk grows as Windows writes data, up to its selected capacity. Keep sufficient free iPad storage for installation and updates. Manage or export machines through Files → On My iPad → WindowsiOS → Machines after shutting down Windows.")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("Close Windows normally before managing its files. Returning to the library leaves the current session running. After Windows stops, close and relaunch WindowsiOS before starting another session or switching machines.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -228,6 +269,7 @@ struct VMConfigurationFields: View {
             }
             Section("Storage and sharing") {
                 Toggle("Primary disk read-only", isOn: $configuration.primaryDiskReadOnly)
+                    .disabled(configuration.installationISO != nil)
                 Toggle("Share Documents/Shared with Windows", isOn: $configuration.sharedFolderEnabled)
                 Text("Windows normally needs a writable primary disk. The optional secondary disk is always read-only. Shared files use the existing WebDAV server at http://10.0.2.4/; NAT networking must be enabled.")
                     .font(.caption).foregroundStyle(.secondary)

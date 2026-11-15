@@ -25,6 +25,20 @@ targets:
           - "Resources/**"
       - path: Sources/Resources/henge-jit.js
         buildPhase: resources
+      - path: ../build/firmware/Firmware
+        type: folder
+        buildPhase: resources
+    preBuildScripts:
+      - name: Prepare bundled EDK2 firmware
+        script: python3 "$SRCROOT/../scripts/prepare_firmware.py"
+        inputFiles:
+          - $(SRCROOT)/../scripts/prepare_firmware.py
+        outputFiles:
+          - $(SRCROOT)/../build/firmware/Firmware/code.fd
+          - $(SRCROOT)/../build/firmware/Firmware/vars-template.fd
+          - $(SRCROOT)/../build/firmware/Firmware/EDK2-LICENSES.txt
+          - $(SRCROOT)/../build/firmware/Firmware/README.Debian.txt
+          - $(SRCROOT)/../build/firmware/Firmware/provenance.json
     info:
       path: Sources/Info.plist
       properties:

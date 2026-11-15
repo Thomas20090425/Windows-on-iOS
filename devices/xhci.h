@@ -4,13 +4,15 @@
 #include <pthread.h>
 
 #include "pcie.h"
+#include "usb_storage.h"
 
 /* xHCI 1.0 USB host controller (MSI-X + INTx) with:
    - Port 1: USB HID Boot Keyboard
    - Port 2: USB HID Absolute Tablet (0..32767 X/Y, L/R/M buttons, vertical/horizontal scroll wheels)
+   - Port 3: Optional USB Mass Storage installation media (optical ISO + answer disk)
    Zero guest drivers required in EDK2 UEFI or Windows 11 ARM64. */
 #define HV_XHCI_SLOTS 8
-#define HV_XHCI_PORTS 2
+#define HV_XHCI_PORTS 3
 #define HV_XHCI_INTRS 4
 #define HV_XHCI_EPS 32 /* device context index 1..31 */
 #define HV_XHCI_REPORTS 256
@@ -22,10 +24,12 @@ typedef struct HvXhciRing {
 
 typedef struct HvXhciSlot {
     int used;
-    int port;         /* 1 = keyboard, 2 = tablet */
+    int port;         /* 1 = keyboard, 2 = tablet, 3 = installation media */
     int configured;
     uint8_t protocol; /* 0 = boot, 1 = report */
     uint8_t idle;
+    uint32_t storage_td_bytes[2]; /* OUT/IN cumulative Event Data transfer lengths */
+    uint8_t storage_td_open[2], storage_td_short[2], storage_td_done[2];
     HvXhciRing ep[HV_XHCI_EPS];
     int ep_running[HV_XHCI_EPS];
 } HvXhciSlot;
@@ -51,6 +55,8 @@ typedef struct HvXhci {
     HvXhciSlot slots[HV_XHCI_SLOTS + 1];
     int kbd_slot;
     int tab_slot;
+    int storage_slot;
+    HvUsbStorage storage;
 
     pthread_mutex_t mu;
     /* Port 1 keyboard reports (8 bytes each) */
@@ -66,6 +72,11 @@ typedef struct HvXhci {
 } HvXhci;
 
 HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus);
+/* Attach before starting vCPUs. LUN0 is an immutable ISO; optional LUN1 is the
+ * app-created read-only removable answer disk. Firmware/Windows use inbox MSC. */
+void hv_xhci_attach_installer(HvXhci *x, HvDisk *iso, HvDisk *answer);
+/* Drop unattended setup on the first warm reset after disk partitioning. */
+void hv_xhci_remove_installer_answer(HvXhci *x);
 /* Any thread: HID usage page 7 key down/up (e.g. 4 = A; 0xe0-0xe7 modifiers). */
 void hv_xhci_key(HvXhci *x, uint8_t usage, int down);
 /* Any thread: Linux input key code down/up. */
