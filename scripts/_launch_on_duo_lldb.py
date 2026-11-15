@@ -14,6 +14,7 @@ import struct
 import subprocess
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 # Import Xcode's LLDB Python bindings
@@ -82,7 +83,31 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", default=DEFAULT_UDID)
     ap.add_argument("--bundle-id", default=DEFAULT_BUNDLE_ID)
+    ap.add_argument("--app", default=os.environ.get("APP_PATH", str(ROOT / "distribution" / "WindowsiOS.app")),
+                    help="Local .app matching the installed build, including any Debug dylib")
     args = ap.parse_args()
+    if not re.fullmatch(r"[A-Za-z0-9-]+", args.device) or not re.fullmatch(r"[A-Za-z0-9.-]+", args.bundle_id):
+        ap.error("Supply an alphanumeric device identifier and bundle identifier")
+
+    WORK.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="duo-jit-symbols-", dir=WORK) as directory:
+        symbols_json = Path(directory) / "symbols.json"
+        # This reads local Mach-O metadata before launching anything on device.
+        subprocess.run([sys.executable, str(ROOT / "scripts" / "jit_symbols.py"),
+                        "--app", args.app, "--bundle-id", args.bundle_id,
+                        "--output", str(symbols_json)], check=True)
+        previous = os.environ.get("WINIOS_JIT_SYMBOLS_JSON")
+        os.environ["WINIOS_JIT_SYMBOLS_JSON"] = str(symbols_json)
+        try:
+            launch(args)
+        finally:
+            if previous is None:
+                os.environ.pop("WINIOS_JIT_SYMBOLS_JSON", None)
+            else:
+                os.environ["WINIOS_JIT_SYMBOLS_JSON"] = previous
+
+
+def launch(args):
 
     WORK.mkdir(parents=True, exist_ok=True)
     launch_json = WORK / "duo_launch.json"
@@ -109,10 +134,14 @@ def main():
         raise RuntimeError("devicectl device process launch failed after 5 attempts")
     info = json.loads(launch_json.read_text())
     pid = info["result"]["process"]["processIdentifier"]
+    if type(pid) is not int or pid <= 0:
+        raise RuntimeError("Invalid process identifier in devicectl response")
     core_device_id = (
         info.get("result", {}).get("device", {}).get("identifier")
-        or "FB6341E2-5109-505C-9A11-CFF7BE9973C3"
+        or args.device
     )
+    if not re.fullmatch(r"[A-Za-z0-9-]+", core_device_id):
+        raise RuntimeError("Invalid CoreDevice identifier in devicectl response")
     print(f"[duo] Launched stopped PID = {pid} on CoreDevice {core_device_id}; attaching LLDB...", flush=True)
 
     lldb.SBDebugger.Initialize()

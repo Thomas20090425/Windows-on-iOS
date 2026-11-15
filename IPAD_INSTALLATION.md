@@ -102,6 +102,28 @@ rejects Xcode-managed profiles when forced into manual signing mode.
    ./scripts/launch_on_device.sh DEVICE_ID me.ammaar.windowsios
    ```
 
+   The launcher reads local symbols from `distribution/WindowsiOS.app` by
+   default. That local app must match the build installed on the iPad. To use
+   the packaged development build, install and launch the same local bundle:
+
+   ```bash
+   ./scripts/install_on_device.sh DEVICE_ID distribution/WindowsiOS.app
+   ./scripts/launch_on_device.sh DEVICE_ID me.ammaar.windowsios distribution/WindowsiOS.app
+   ```
+
+   If you installed a Debug build from Xcode, supply that exact app instead:
+
+   ```bash
+   APP_PATH="/path/to/the/installed/WindowsiOS.app" ./scripts/launch_on_device.sh DEVICE_ID
+   ```
+
+   Keep the entire `.app`, including `WindowsiOS.debug.dylib` when present.
+   Xcode Debug can put JIT symbols in that dylib rather than the executable.
+   The launcher checks local Mach-O metadata before launching, then matches
+   device image UUIDs before applying image-specific ASLR relocation. If the
+   Debug image is not loaded at the initial stopped launch, it waits at app
+   bootstrap before arming JIT. It does not guess addresses across builds.
+
    Alternatively, use **Enable JIT on Device** in the library/session with
    StikDebug installed and configured. Return to WindowsiOS and tap Start after
    the helper attaches. Only one debugger can own the process; detach/stop a
@@ -220,6 +242,8 @@ iPadOS may suspend or terminate the app. Keep it foregrounded while working.
 | Cannot install | Rebuild with a matching development profile registering this iPad. |
 | Waiting for JIT | Run the device launch helper, then tap Start on the iPad. A signed app alone does not enable JIT. |
 | `EXC_BREAKPOINT` in `winios_brk.S` | The stopped instructions are the custom JIT protocol. Rebuild/reinstall the current app and use its matching helper. A normal Xcode Run attachment does not service that protocol; do not skip arbitrary breakpoint instructions. |
+| LLDB cannot find `winios_jit_helper_token` | Use the updated launcher and the matching local `.app`. This error can mean absent LLDB metadata or an unloaded Debug dylib; it does not alone establish an old app. |
+| App UUID mismatch | Set `APP_PATH` to the exact Xcode-built app installed on the device, or install `distribution/WindowsiOS.app` and launch using that same path. No address guessing is permitted. |
 | Delete unavailable | Stop the VM and relaunch the app to release retained engine state. Wait for imports/extraction/deletion to finish. |
 | JIT trap/allocation failure | Record the OS/model and helper error. This device/OS combination remains unsupported until verified. |
 | Insufficient reservation | Relaunch, select supported memory before Start, and initialize JIT again. No sub-4-GiB fallback is used. |

@@ -8,6 +8,8 @@ The user then corrected setup requirements: **Windows ISO only**, firmware
 bundled with the app, automatic private NVRAM, and app-created writable disks.
 The user subsequently reported a start-time `EXC_BREAKPOINT` in the JIT
 assembly and requested deletion of past VMs.
+Their subsequent Mac launcher log reached device attachment but failed to find
+the readiness symbol; remote symbol availability had been mistaken for app age.
 
 ## Completed source work
 
@@ -39,6 +41,11 @@ assembly and requested deletion of past VMs.
 - Added iPad Enable JIT actions, visible helper-open errors and VM deletion
   with confirmation, native ownership checks, strict directory validation and
   a deletion reservation preventing new starts from racing removal.
+- Corrected launcher symbol resolution: local `.app` metadata includes Xcode's
+  Debug dylib, device image UUIDs must match, ASLR relocation is per image, and
+  deferred Debug loading stops at bootstrap before JIT readiness is written.
+  Missing metadata, unloaded images and mismatched builds now have distinct
+  diagnostics. Universal and Duo launchers share the metadata preflight.
 
 ## Build evidence and constraints
 
@@ -57,6 +64,10 @@ assembly and requested deletion of past VMs.
 - Startup/deletion correction: `99dbef2` — helper handshake and guarded VM
   deletion. Release and Debug arm64 configurations both compiled; helper syntax
   checks and signature/package checks passed. No runtime checks or deletion ran.
+- Launcher symbol correction: Python/shell syntax compilation passed, and local
+  Release/Debug symbol manifests were generated through read-only Mach-O
+  inspection. No app source changed or new app build was needed; no debugger,
+  device/VM execution or runtime test was performed for this correction.
 
 ## Remaining external/runtime work
 

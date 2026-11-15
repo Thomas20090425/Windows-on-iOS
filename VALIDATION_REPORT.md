@@ -31,8 +31,9 @@ they do not validate the subsequently added app/device changes.
 | Baseline core regressions | **PASSED BEFORE SCOPE CHANGE** | `build/logs/core-baseline.log`: classifier 43 cases, operands 36 cases, JIT 10 programs × 2 seeds, memory 12 programs × 3 modes + MMIO, MMU 76 checks, exceptions 53 checks; all reported zero failures. JIT-region baseline also completed. No rerun after source changes. |
 | New input/UI/config/lifecycle/storage tests | **NOT RUN — USER REQUEST** | Source and build checks only; no runtime assertions claimed. |
 | JIT helper correction and VM deletion | **COMPILED; NOT RUNTIME-TESTED** | Release/Debug compile; exported readiness word and exact assembly trap labels are present in the packaged Mach-O. Python/JavaScript helper syntax checks passed. No helper attachment or user VM deletion executed. |
+| Local symbols for device launcher | **METADATA PREPARED; NOT DEVICE-TESTED** | `build/jit-symbols-release.json` and `build/jit-symbols-debug.json` record Mach-O UUIDs/addresses from the local products, including the Debug dylib. Python/shell syntax compilation passed. No LLDB process was launched during this correction. |
 | Simulator UI checks | **NOT RUN — USER REQUEST** | Simulator compilation/execution is not native JIT verification. |
-| Physical installation | **NOT TESTED** | No suitable connected iPad/Duo; install script supplied but unexecuted. |
+| Physical installation | **USER-REPORTED LAUNCH; NOT AGENT-TESTED** | User supplied devicectl output showing bundle `me.ammaar.windowsios` launched on device with PID 2377. Its precise build UUID was not logged. No installation or device launch executed by the agent. |
 | Device JIT initialization | **NOT TESTED** | Existing TXM trap protocol retained, selected-memory reservation added; no debugger attachment performed. |
 | UEFI/ISO boot and unattended Windows installation | **NOT TESTED** | Open-source firmware is now bundled, but no Windows ISO was supplied and VM execution was prohibited. No successful installation is claimed. |
 | Keyboard/mouse/trackpad/Pencil | **NOT TESTED** | Native event → bridge → existing xHCI HID source path compiles; no physical or guest validation. |
@@ -77,6 +78,25 @@ The supplied numeric PC alone did not establish an ASLR-resolved symbol; the
 user's assembly source narrowed the diagnosis. Runtime reproduction was not
 performed. Apple's [trap exception documentation](https://developer.apple.com/documentation/xcode/sigtrap_sigill)
 also distinguishes debugger trap stops from other underlying runtime failures.
+
+The user then supplied a Mac helper log where device launch/attachment succeeded
+but LLDB could not resolve `winios_jit_helper_token`. The previous error wrongly
+treated that as sufficient evidence of an outdated installed app. Local static
+inspection establishes that the Release executable contains the symbol while
+the Debug executable is an Xcode executor stub: Debug JIT symbols are in
+`WindowsiOS.debug.dylib`. Which metadata was loaded in the user's remote target
+was not captured, so the exact live resolution failure remains unverified.
+
+Updated launchers accept a matching local `.app`, generate pure Mach-O metadata
+before launching, and pass it to the helper. The helper uses strict image UUID
+matching and each image's own `__TEXT` base for ASLR relocation, validates trap
+instruction bytes before any readiness write, handles delayed Debug image
+loading at a bounded bootstrap breakpoint, and reports mismatched builds
+separately. Direct LLDB symbol lookup also accepts non-data classifications.
+These use documented [LLDB module](https://lldb.llvm.org/python_api/lldb.SBModule.html)
+and [target](https://lldb.llvm.org/python_api/lldb.SBTarget.html) APIs. Syntax
+compilation and read-only local metadata preparation are the only new evidence;
+no successful device handshake or Windows boot is claimed.
 
 VM deletion now has sidebar swipe/context and detail actions, named confirmation,
 strict library-directory/symlink validation, background removal and a native

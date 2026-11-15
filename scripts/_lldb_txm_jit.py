@@ -4,14 +4,19 @@ LLDB script module imported inside `xcrun lldb` so Xcode's built-in CoreDevice
 in-process `lldb.SBProcess` speed!
 """
 
+import json
+import os
 import re
 import struct
+import sys
 import time
 from pathlib import Path
 import lldb
 
 ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / "work"
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
 
 
 def run_cmd(debugger, cmd: str) -> str:
@@ -93,18 +98,155 @@ def bless_txm_region(debugger, process, rx_addr: int, size: int):
 HELPER_TOKEN = 0x574A4954
 
 
+class JITImageNotLoaded(RuntimeError):
+    pass
+
+
+def normalized_uuid(value):
+    return (value or "").replace("-", "").upper()
+
+
+def symbol_manifest():
+    path = os.environ.get("WINIOS_JIT_SYMBOLS_JSON")
+    if not path:
+        return None
+    from jit_symbols import read_image
+    manifest = json.loads(Path(path).read_text())
+    if manifest.get("version") != 1:
+        raise RuntimeError("Unsupported local JIT symbol manifest; rerun the updated launcher")
+    for image in manifest["images"]:
+        actual = read_image(image["path"])
+        if actual != image:
+            raise RuntimeError("Local app changed after symbol preflight. Rerun the launcher with the installed app's APP_PATH.")
+    return manifest
+
+
+def loaded_images(target):
+    images = []
+    for index in range(target.GetNumModules()):
+        module = target.GetModuleAtIndex(index)
+        address = module.GetObjectFileHeaderAddress().GetLoadAddress(target)
+        if address == lldb.LLDB_INVALID_ADDRESS:
+            section = module.FindSection("__TEXT")
+            address = section.GetLoadAddress(target) if section.IsValid() else lldb.LLDB_INVALID_ADDRESS
+        if address in (0, lldb.LLDB_INVALID_ADDRESS):
+            continue
+        images.append({"uuid": normalized_uuid(module.GetUUIDString()), "header": address,
+                       "name": module.GetFileSpec().GetFilename() or ""})
+    return images
+
+
+def manifest_addresses(target, manifest):
+    from jit_symbols import REQUIRED
+    remote = loaded_images(target)
+    local_ids = {normalized_uuid(image["uuid"]) for image in manifest["images"]}
+    names = {Path(image["path"]).name for image in manifest["images"]}
+    for image in remote:
+        if image["name"] in names and image["uuid"] and image["uuid"] not in local_ids:
+            raise RuntimeError(
+                f"App UUID mismatch: device {image['name']} has UUID {image['uuid']}, which is not in {manifest['app']}. "
+                "Set APP_PATH to the exact .app installed by Xcode, or install the local development app before launching. "
+                "No JIT addresses have been written."
+            )
+    for local in manifest["images"]:
+        if not all(name in local["symbols"] for name in REQUIRED):
+            continue
+        for image in remote:
+            if image["uuid"] == normalized_uuid(local["uuid"]):
+                # UUID is the identity boundary. Each image has its own slide:
+                # Debug dylibs start at zero; Release executables usually don't.
+                return {name: image["header"] + value - local["text_vmaddr"]
+                        for name, value in local["symbols"].items()}
+    raise JITImageNotLoaded("The matching app JIT image has not been loaded by dyld yet")
+
+
+def wait_for_bootstrap(debugger, target, process, manifest):
+    # Load metadata only. Do not assign guessed runtime addresses to modules.
+    for image in manifest["images"]:
+        module = target.AddModule(image["path"], "arm64-apple-ios", image["uuid"])
+        if not module.IsValid():
+            raise RuntimeError(f"LLDB could not load local image metadata: {image['path']}")
+    breakpoint = target.BreakpointCreateByName("winios_jit_install_trap_handler")
+    if not breakpoint.IsValid():
+        raise RuntimeError("Cannot prepare the app bootstrap breakpoint")
+    identifier = breakpoint.GetID()
+    print("[txm-jit] Waiting for the app's Debug JIT image to load at bootstrap", flush=True)
+    try:
+        # An initial stopped launch can precede Debug dylib loading. Bound this
+        # bootstrap wait so a mismatched/old app cannot leave the helper hanging.
+        debugger.SetAsync(True)
+        initial_stop = process.GetStopID()
+        error = process.Continue()
+        if not error.Success():
+            raise RuntimeError(f"Cannot resume app bootstrap: {error.GetCString()}")
+        deadline = time.monotonic() + 30.0
+        listener, event = debugger.GetListener(), lldb.SBEvent()
+        while True:
+            state = process.GetState()
+            if state == lldb.eStateStopped and process.GetStopID() != initial_stop:
+                break
+            if state in (lldb.eStateExited, lldb.eStateDetached, lldb.eStateCrashed):
+                raise RuntimeError(f"App left bootstrap in state {state}; no JIT addresses were written")
+            if time.monotonic() >= deadline:
+                stopped = process.Stop()
+                if not stopped.Success() or process.GetState() != lldb.eStateStopped:
+                    raise RuntimeError(f"App bootstrap timed out and could not be stopped: {stopped.GetCString()}. No JIT addresses were written.")
+                raise RuntimeError("Timed out before the app JIT image loaded. Check APP_PATH against the installed app; no JIT addresses were written.")
+            listener.WaitForEvent(1, event)
+        if process.GetState() != lldb.eStateStopped:
+            raise RuntimeError(f"App left bootstrap in state {process.GetState()}; no JIT addresses were written")
+        our_stop = any(
+            process.GetThreadAtIndex(index).GetStopReason() == lldb.eStopReasonBreakpoint and
+            process.GetThreadAtIndex(index).GetStopReasonDataCount() >= 2 and
+            process.GetThreadAtIndex(index).GetStopReasonDataAtIndex(0) == identifier
+            for index in range(process.GetNumThreads())
+        )
+        if not our_stop:
+            raise RuntimeError("App stopped before the JIT bootstrap breakpoint; leaving the unrelated stop untouched")
+        return manifest_addresses(target, manifest)
+    finally:
+        debugger.SetAsync(False)
+        if process.GetState() not in (lldb.eStateRunning, lldb.eStateStepping, lldb.eStateLaunching):
+            target.BreakpointDelete(identifier)
+
+
+def resolve_jit_addresses(debugger, target, process):
+    manifest = symbol_manifest()
+    if manifest:
+        try:
+            addresses = manifest_addresses(target, manifest)
+        except JITImageNotLoaded:
+            addresses = wait_for_bootstrap(debugger, target, process, manifest)
+        # Validate relocated code before any handshake write. An incorrect
+        # symbol type, slide or stale local build must never become an address.
+        expected = {"winios_brk_probe_trap": 0x69,
+                    "winios_brk_mapping_trap": 0xF00D, "winios_brk_detach_trap": 0xF00D}
+        for name, immediate in expected.items():
+            error = lldb.SBError()
+            observed = process.ReadMemory(addresses[name], 4, error)
+            wanted = struct.pack("<I", 0xD4200000 | (immediate << 5))
+            if not error.Success() or observed != wanted:
+                raise RuntimeError(f"Relocated {name} does not contain its expected instruction; refusing to arm JIT")
+        return addresses
+    # Xcode console users may already have complete local symbols loaded.
+    # The universal launcher always supplies the UUID-checked manifest.
+    from jit_symbols import REQUIRED
+    return {name: symbol_load_address(target, name) for name in REQUIRED}
+
+
 def symbol_load_address(target, symbol_name, symbol_type=lldb.eSymbolTypeAny):
     # Resolve symbols without evaluating expressions in the target process.
-    for name in (symbol_name, "_" + symbol_name):
-        matches = target.FindSymbols(name, symbol_type)
-        for index in range(matches.GetSize()):
-            symbol = matches.GetContextAtIndex(index).GetSymbol()
-            if not symbol.IsValid():
-                continue
-            address = symbol.GetStartAddress().GetLoadAddress(target)
-            if address != lldb.LLDB_INVALID_ADDRESS and address != 0:
-                return address
-    raise RuntimeError(f"This app does not expose {symbol_name}. Rebuild/reinstall the current app and matching launcher.")
+    for kind in dict.fromkeys((symbol_type, lldb.eSymbolTypeAny)):
+        for name in (symbol_name, "_" + symbol_name):
+            matches = target.FindSymbols(name, kind)
+            for index in range(matches.GetSize()):
+                symbol = matches.GetContextAtIndex(index).GetSymbol()
+                if not symbol.IsValid():
+                    continue
+                address = symbol.GetStartAddress().GetLoadAddress(target)
+                if address != lldb.LLDB_INVALID_ADDRESS and address != 0:
+                    return address
+    raise RuntimeError(f"LLDB has no loaded symbol for {symbol_name}. Use launch_on_device.sh with APP_PATH set to the matching local .app.")
 
 
 def helper_token_address(target):
@@ -132,7 +274,7 @@ def write_helper_token(process, address, value):
         raise RuntimeError("JIT helper handshake read-back did not match")
 
 
-def txm_jit_cmd(debugger, command, exe_ctx, result, internal_dict):
+def run_txm_jit(debugger, command, exe_ctx, result, internal_dict):
     debugger.SetAsync(False)
     target = debugger.GetSelectedTarget()
     process = target.GetProcess()
@@ -155,8 +297,11 @@ def txm_jit_cmd(debugger, command, exe_ctx, result, internal_dict):
         else:
             time.sleep(0.05)
 
-    token_address = helper_token_address(target)
-    traps = protocol_traps(target)
+    addresses = resolve_jit_addresses(debugger, target, process)
+    token_address = addresses["winios_jit_helper_token"]
+    traps = {addresses["winios_brk_probe_trap"]: (0x69, None),
+             addresses["winios_brk_mapping_trap"]: (0xF00D, 1),
+             addresses["winios_brk_detach_trap"]: (0xF00D, 0)}
     try:
         write_helper_token(process, token_address, HELPER_TOKEN)
         print("[txm-jit] JIT trap helper armed and read-back verified", flush=True)
@@ -244,6 +389,15 @@ def txm_jit_cmd(debugger, command, exe_ctx, result, internal_dict):
                 write_helper_token(process, token_address, 0)
             except Exception as error:
                 print(f"[txm-jit] Could not clear helper readiness: {error}", flush=True)
+
+
+def txm_jit_cmd(debugger, command, exe_ctx, result, internal_dict):
+    try:
+        return run_txm_jit(debugger, command, exe_ctx, result, internal_dict)
+    except Exception as error:
+        if result is None:  # Standalone launcher owns its explicit cleanup.
+            raise
+        result.SetError(str(error))
 
 
 def __lldb_init_module(debugger, internal_dict):
