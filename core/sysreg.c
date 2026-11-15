@@ -1,4 +1,5 @@
 #include "sysreg.h"
+#include "cpu_model.h"
 
 #include <mach/mach_time.h>
 #include <stdio.h>
@@ -21,10 +22,9 @@
 #define ID_AA64MMFR0 0x0000000000100025ull /* 48-bit PA, 16-bit ASID, 4K/16K/64K granules */
 #define ID_AA64MMFR1 0x0000000000111000ull /* HPDS, LOR, PAN */
 #define ID_AA64DFR0  0x0000000000000006ull /* Armv8 debug, no PMU */
-#define MIDR         0x414fd0b1ull         /* ARM Cortex-A76 r4p1: recognized by Windows 11 ARM64 ntoskrnl */
 #define CTR_EL0      0x9444c004ull         /* 64-byte lines, PIPT I-cache, IDC */
 #define CLIDR        0x0a200023ull         /* L1 split, L2 unified */
-#define CNTFRQ       24000000ull
+#define CNTFRQ       HV_CPU_COUNTER_HZ
 
 static uint64_t counter(void) {
     return mach_absolute_time(); /* 24 MHz on Apple silicon */
@@ -114,7 +114,7 @@ static int read_reg(HvCpu *cpu, uint32_t reg, uint64_t *v) {
     case R(3, 2, 0, 0, 0): *v = cpu->csselr_el1; return 0;
 
     /* Identification */
-    case R(3, 0, 0, 0, 0): *v = MIDR; return 0;
+    case R(3, 0, 0, 0, 0): *v = HV_CPU_MIDR; return 0;
     case R(3, 0, 0, 0, 5): *v = cpu->mpidr; return 0;
     case R(3, 0, 0, 0, 6): *v = 0; return 0;                             /* REVIDR */
     case R(3, 0, 0, 4, 0): *v = ID_AA64PFR0; return 0;
@@ -143,7 +143,7 @@ static int read_reg(HvCpu *cpu, uint32_t reg, uint64_t *v) {
     case R(3, 3, 14, 3, 2): *v = cpu->cntv_cval; return 0;
 
     /* PMU cycle counter: Windows 11 24H2 ntoskrnl calibrates against PMCCNTR_EL0 at boot. */
-    case R(3, 3, 9, 13, 0): *v = now * 128ull; return 0;                 /* ~3.072 GHz from 24 MHz counter */
+    case R(3, 3, 9, 13, 0): *v = now * HV_CPU_PMCCNTR_SCALE; return 0; /* Nominal virtual cycles, not host frequency. */
     }
     /* GIC CPU interface (ICC_*_EL1): CRn 12, CRm 8..12, and ICC_PMR_EL1. */
     if (reg == R(3, 0, 4, 6, 0) || ((reg >> 14) == 3 && ((reg >> 11) & 7) == 0 && ((reg >> 7) & 15) == 12 && ((reg >> 3) & 15) >= 8)) {

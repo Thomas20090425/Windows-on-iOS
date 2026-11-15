@@ -23,7 +23,7 @@ static void notify(HvVirtio *v, int q) {
         hv_virtq_push(v, q, &e, 0);
         any = 1;
     }
-    if (any) hv_virtio_interrupt(v);
+    if (any) hv_virtio_queue_interrupt(v, TXQ);
 }
 
 int hv_virtio_net_receive(HvVirtioNet *n, const uint8_t *frame, uint32_t len) {
@@ -32,7 +32,7 @@ int hv_virtio_net_receive(HvVirtioNet *n, const uint8_t *frame, uint32_t len) {
     if (!(v->status & 4) || !v->q[RXQ].enabled || hv_virtq_pop(v, RXQ, &e) <= 0) return 0;
     if (hv_virtq_writable(&e) < HDR_LEN + len) { /* too small for it: drop the frame, return the buffer */
         hv_virtq_push(v, RXQ, &e, 0);
-        hv_virtio_interrupt(v);
+        hv_virtio_queue_interrupt(v, RXQ);
         n->rx_dropped++;
         return 1;
     }
@@ -41,7 +41,7 @@ int hv_virtio_net_receive(HvVirtioNet *n, const uint8_t *frame, uint32_t len) {
     hv_virtq_write(v, &e, 0, hdr, HDR_LEN);
     hv_virtq_write(v, &e, HDR_LEN, frame, len);
     hv_virtq_push(v, RXQ, &e, HDR_LEN + len);
-    hv_virtio_interrupt(v);
+    hv_virtio_queue_interrupt(v, RXQ);
     n->rx_frames++;
     return 1;
 }
@@ -50,7 +50,8 @@ HvVirtioNet *hv_virtio_net_create(HvMachine *m, HvPcie *bus, const uint8_t mac[6
     HvVirtioNet *n = calloc(1, sizeof *n);
     HvVirtio *v = &n->vio;
     hv_virtio_init(v, m, 1, 0x020000, 2, F_MAC | F_STATUS);
-    v->pci.config[0x2e] = 0x00; /* SUBSYS_11001AF4: exact primary hardware ID in Red Hat WHQL netkvm.inf */
+    hv_virtio_enable_msix(v, 3); /* configuration, RX and TX; retain legacy INTx fallback */
+    v->pci.config[0x2e] = 0x00; /* SUBSYS_11001AF4: primary ID in the unmodified ARM64 NetKVM INF */
     v->pci.config[0x2f] = 0x11;
     v->dev = n;
     v->notify = notify;

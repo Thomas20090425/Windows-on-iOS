@@ -23,6 +23,7 @@
 #include "virtio_snd.h"
 #include "xhci.h"
 #include "tpm_crb.h"
+#include "virtio_gpu.h"
 
 /* Standard ARM64 'virt' physical memory map for EDK2 UEFI + Windows 11 ARM64 */
 #define WINVIRT_FLASH0_PA     0x00000000ULL
@@ -81,6 +82,7 @@ typedef struct HvWinVirt {
     HvHda *hda;
     HvVirtioSnd *snd;
     HvTpmCrb *tpm;
+    HvVirtioGpu *gpu;
 
     uint32_t ged_events;
     void (*poll)(void);

@@ -87,7 +87,13 @@ struct IPadSessionView: View {
                         Text(vm.jitStatusText).font(.caption)
                     }
                     Section("Display") {
-                        Text("The guest framebuffer keeps its aspect ratio as the iPad window changes size. Change Windows display settings inside the guest.")
+                        Picker("Windows resolution", selection: $configuration.displayResolution) {
+                            ForEach(VMDisplayResolution.allCases) { Text($0.title).tag($0) }
+                        }
+                        Toggle("Follow screen or window changes", isOn: $configuration.dynamicResolution)
+                        LabeledContent("Display device", value: WinIOSBridge.shared.graphicsStatusText)
+                        LabeledContent("Preferred mode", value: WinIOSBridge.shared.preferredResolutionText)
+                        Text("Requires the bundled Windows ARM64 display driver. Windows can also change resolution in Settings. Screen/window changes request a preferred mode; Windows controls the active mode. 3D hardware acceleration is unavailable.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -106,7 +112,16 @@ struct IPadSessionView: View {
         .onChange(of: configuration.touchTrackpad) { _, value in vm.trackpadMode = value }
         .onChange(of: configuration.commandToControl) { _, value in UserDefaults.standard.set(value, forKey: "mapCommandToControl") }
         .onChange(of: configuration.pointerSensitivity) { _, value in UserDefaults.standard.set(value, forKey: "pointerSensitivity") }
+        .onChange(of: configuration.displayResolution) { _, _ in applyDisplaySettings() }
+        .onChange(of: configuration.dynamicResolution) { _, _ in applyDisplaySettings() }
         .onDisappear { vm.systemKeyboardVisible = false }
+    }
+
+    private func applyDisplaySettings() {
+        let resolution = configuration.displayResolution
+        _ = WinIOSBridge.shared.configureDisplayResolutionMode(resolution.mode,
+                width: resolution.size.width, height: resolution.size.height,
+                dynamicResolution: configuration.dynamicResolution)
     }
 
     private var controls: some View {

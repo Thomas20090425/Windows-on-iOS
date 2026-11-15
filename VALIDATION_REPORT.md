@@ -4,7 +4,7 @@ Date: **2026-11-15**, America/Toronto. Target: **Windows 11 24H2 ARM64**,
 confirmed by the user. Branch: `codex/ipad-24h2-build`.
 Initial universal-app implementation commit: `69b2e7e`. This report now covers
 the ISO-only setup correction `01b9340`, startup/deletion correction `99dbef2`,
-and the software TPM 2.0, mouse-button, custom RAM and F-key update.
+and the software TPM/input plus networking, CPU identity and VirtIO display updates.
 
 ## Verification scope
 
@@ -20,7 +20,7 @@ they do not validate the subsequently added app/device changes.
 | Deliverable/check | Result | Evidence and limit |
 | --- | --- | --- |
 | Native ARM64 iOS engine archive | **COMPILED** | `build/ios/libwinvm.a`, included in final signed app build. |
-| Universal Swift/Objective-C/native application | **COMPILED** | `build/logs/ios-app-build-tpm-input-signed.log` ends with `BUILD SUCCEEDED`; includes software TPM 2.0, custom RAM entry, mouse-button changes and F1–F12 UI, plus prior startup/deletion/ISO work. |
+| Universal Swift/Objective-C/native application | **COMPILED** | `build/logs/ios-app-build-network-display-signed.log` ends with `BUILD SUCCEEDED`; includes networking/driver media, CPU identity, VirtIO GPU and resolution controls, plus prior TPM/input/ISO work. |
 | Xcode Debug configuration | **EARLIER BUILD COMPILED** | `build/logs/ios-app-build-jit-delete-debug.log` covers the earlier startup/deletion changes. The current TPM/input artifact was built in Release; no Debug runtime or device execution. |
 | iPad device-target compilation | **COMPILED** | Generic `iphoneos` arm64 build; bundled `UIDeviceFamily` includes 2. No device run. |
 | Duo/iPhone device-target compilation | **COMPILED** | Same universal arm64 artifact includes family 1; manual posture layout retained. Future hinge API excluded by SDK guard. No Duo run. |
@@ -30,6 +30,9 @@ they do not validate the subsequently added app/device changes.
 | Bundled UEFI/variable template | **PACKAGED, HASHES CHECKED** | Matched 64 MiB `Firmware/code.fd` and `vars-template.fd` included in signed app. Pinned Debian EDK2 2025.02-8+deb13u1 package; manifest records hashes. Full licenses/provenance included. This proves packaged bytes, not firmware execution. |
 | Software TPM 2.0 | **COMPILED; NOT RUNTIME-TESTED** | Static iOS arm64 libtpms 0.10.2 + OpenSSL 3.5.9. Actual command backend, CRB/FIFO MMIO, ACPI/FDT discovery, per-VM atomic NV storage, identity binding and reset/error handling compile. Library source/API and bundled firmware configuration reviewed. No TPM command, key-persistence, measured-boot, Windows enrollment or BitLocker workload executed. |
 | Mouse buttons, numeric RAM and F1–F12 | **COMPILED; NOT DEVICE-TESTED** | Direct hardware button callbacks and passive UIKit pointer observation, held-state preservation, custom whole-MiB RAM with shared native bounds, hardware keyboard detection and actual guest F-key HID usages compile. No physical mouse/keyboard or RAM-allocation behavior verified. |
+| Windows ARM64 network/display drivers | **PACKAGED; METADATA CHECKED** | Official pinned virtio-win 0.1.302-1. Selected SYS/EXE PE machine is 0xAA64, INF matches ARM64 and actual virtual devices, catalog publisher metadata is present, and the bundled 64 MiB FAT driver image hash matches provenance. No Windows trust/installation or Internet traffic run. |
+| Virtual CPU model | **COMPILED; SOURCE REVIEWED** | Shared Cortex-A76 r4p1 MIDR/model/manufacturer/FDT constants; SMBIOS and app report the virtual compatibility profile. Feature execution was not exercised. |
+| VirtIO GPU 2D and resolution control | **COMPILED; NOT RUNTIME-TESTED** | Real 2D resources/transfers/scanout/cursor/EDID, MSI-X mode-change events, framebuffer lifetime locks, native/window/preset controls and official guest resolution service. Firmware console remains RAMFB. No accelerated 3D or host GPU passthrough. Guest modesets unverified. |
 | Baseline core regressions | **PASSED BEFORE SCOPE CHANGE** | `build/logs/core-baseline.log`: classifier 43 cases, operands 36 cases, JIT 10 programs × 2 seeds, memory 12 programs × 3 modes + MMIO, MMU 76 checks, exceptions 53 checks; all reported zero failures. JIT-region baseline also completed. No rerun after source changes. |
 | New input/UI/config/lifecycle/storage tests | **NOT RUN — USER REQUEST** | Source and build checks only; no runtime assertions claimed. |
 | JIT helper correction and VM deletion | **COMPILED; NOT RUNTIME-TESTED** | Release/Debug compile; exported readiness word and exact assembly trap labels are present in the packaged Mach-O. Python/JavaScript helper syntax checks passed. No helper attachment or user VM deletion executed. |
@@ -54,7 +57,7 @@ No credentials or provisioning files were added to Git.
 IPA SHA-256:
 
 ```text
-28ac48da536b5fa087d8a4e6446359a83243fcb2c410f0fe66c68e4b40c321c6
+5251bfa1a41465efcb1e7898412bdabd8effc79bc1097aaceb2c918bd9214d70
 ```
 
 ## Build issues resolved
@@ -241,8 +244,21 @@ policy, not proof that a model can boot Windows or avoid process termination.
 Pencil pressure/tilt/eraser/Windows Ink pen identity require a future digitizer
 device/report implementation; a guest driver alone cannot add that path.
 Full engine teardown is absent, so another VM session requires app relaunch.
-Snapshots, suspend, accelerated GPU, dynamic guest resolution, arbitrary CPU
-models, bridged network and UTM bundle import are not exposed as working features.
+The latest display/network build adds a VirtIO GPU 2D backend and the pinned
+Windows ARM64 NetKVM/viogpudo packages. The readonly driver medium is attached
+as LUN2 even without an installation ISO. Fresh guarded setup copies drivers
+through the WindowsPE configuration-set path and attempts the official helper
+service installation during specialize. Failures are logged without aborting
+Windows setup; existing VMs run the included installer as administrator once.
+No Windows executable was run on this Mac. Preferred EDID/config-change events
+and the official guest service support dynamic modes; actual native/Windows
+resolution changes remain unverified. The GPU subsystem compatibility ID keeps
+the pinned firmware's BLT-only GOP out of the boot path, preserving RAMFB.
+Signed packaging and fresh local Mach-O launch metadata were prepared after
+the build; no debugger or device attachment was performed.
+
+Snapshots, suspend, accelerated 3D, arbitrary CPU models, bridged network and
+UTM bundle import are not exposed as working features.
 
 Install and explicitly launch using the procedure in
 [IPAD_INSTALLATION.md](IPAD_INSTALLATION.md). The original upstream screenshots

@@ -31,6 +31,7 @@ static HvDisk disk0 = {.fd = -1};
 static HvDisk disk1 = {.fd = -1};
 static HvDisk installer_iso = {.fd = -1};
 static HvDisk installer_answer = {.fd = -1};
+static HvDisk driver_disk = {.fd = -1};
 static int net_on;
 static int share_on;
 static _Atomic int stop_requested;
@@ -152,6 +153,30 @@ uint64_t hv_winvm_display_frames(void) {
     return fb ? hv_fb_metal_frames(fb) : 0;
 }
 
+int hv_winvm_set_display_mode(uint32_t width, uint32_t height) {
+    if (!board.gpu) return -1;
+    hv_dev_lock(&m);
+    int result = hv_virtio_gpu_set_preferred(board.gpu, width, height);
+    hv_dev_unlock(&m);
+    return result;
+}
+
+int hv_winvm_graphics_active(void) {
+    if (!board.gpu) return 0;
+    hv_dev_lock(&m);
+    int ready = hv_virtio_gpu_driver_ready(board.gpu);
+    hv_dev_unlock(&m);
+    return ready;
+}
+
+int hv_winvm_network_driver_ready(void) {
+    if (!board.net || !net_on) return 0;
+    hv_dev_lock(&m);
+    int ready = (board.net->vio.status & 4) != 0;
+    hv_dev_unlock(&m);
+    return ready;
+}
+
 int hv_winvm_save_png(const char *path) {
     HvFbDisplay *fb = atomic_load_explicit(&display_fb, memory_order_acquire);
     return fb ? hv_fb_save_png(fb, path) : -1;
@@ -192,6 +217,10 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
              installer_answer.size < 512 || installer_answer.size % 512 != 0))
             return fail(err, errlen, "Cannot open the app-created setup answer disk.");
     }
+    if (c->driver_disk && *c->driver_disk &&
+        (hv_disk_open(&driver_disk, c->driver_disk, 0, 1) != 0 ||
+         driver_disk.size < 512 || driver_disk.size % 512 != 0))
+        return fail(err, errlen, "Cannot open the bundled Windows ARM64 driver disk.");
 
     size_t jit = c->jit_bytes ? c->jit_bytes : ((size_t)768 << 20);
     int r = c->jit_rx ? hv_machine_init_jit(&m, c->jit_rx, c->jit_rw, jit) : hv_machine_init(&m, jit);
@@ -216,8 +245,13 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
         return fail(err, errlen, "Cannot create virtual ARM64 Windows board (insufficient RAM or missing firmware).");
     }
     hv_winvirt_reset_cpu(&board);
+    board.gpu = hv_virtio_gpu_create(&m, board.pcie, board.fb,
+        c->display_width ? c->display_width : 1920,
+        c->display_height ? c->display_height : 1080);
+    if (!board.gpu) return fail(err, errlen, "Cannot create the VirtIO 2D display device.");
     if (installer_iso.fd >= 0 && board.usb)
         hv_xhci_attach_installer(board.usb, &installer_iso, installer_answer.fd >= 0 ? &installer_answer : NULL);
+    if (driver_disk.fd >= 0 && board.usb) hv_xhci_attach_driver_disk(board.usb, &driver_disk);
     if (board.fb) board.fb->presentation_hz = c->display_refresh_hz == 30 || c->display_refresh_hz == 120 ? c->display_refresh_hz : 60;
     hv_audio_set_microphone_enabled(!c->disable_microphone);
 
@@ -343,6 +377,9 @@ int hv_winvm_run_cpu0(void) {
                 pthread_mutex_unlock(&board.gic->mu);
             }
             hv_gicv3_its_reset(board.its);
+            hv_dev_lock(&m);
+            hv_virtio_gpu_reset(board.gpu);
+            hv_dev_unlock(&m);
             hv_pcie_reset(board.pcie);
             if (board.flash1) {
                 board.flash1->cmd = 0xff;

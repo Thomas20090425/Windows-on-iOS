@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "fdt.h"
+#include "cpu_model.h"
 #include "tpm_crb.h"
 
 #include <stdio.h>
@@ -362,7 +363,7 @@ uint8_t *hv_fdt_build_virt(int ncpus, uint64_t ram_base, uint64_t ram_size, size
         fdt_prop_u32(&st, &strs, "phandle", PHANDLE_CPU0 + (uint32_t)i);
         fdt_prop_u32(&st, &strs, "reg", (uint32_t)i);
         fdt_prop_str(&st, &strs, "enable-method", "psci");
-        fdt_prop_str(&st, &strs, "compatible", "arm,cortex-a76");
+        fdt_prop_str(&st, &strs, "compatible", HV_CPU_FDT_COMPATIBLE);
         fdt_prop_str(&st, &strs, "device_type", "cpu");
         fdt_end_node(&st);
     }

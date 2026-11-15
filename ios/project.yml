@@ -31,6 +31,9 @@ targets:
       - path: deps/licenses/TPM
         type: folder
         buildPhase: resources
+      - path: ../build/WindowsDrivers
+        type: folder
+        buildPhase: resources
     preBuildScripts:
       - name: Prepare bundled EDK2 firmware
         script: python3 "$SRCROOT/../scripts/prepare_firmware.py"
@@ -54,6 +57,7 @@ targets:
         UIStatusBarHidden: true
         UIViewControllerBasedStatusBarAppearance: false
         NSMicrophoneUsageDescription: "Windows can use your microphone for live voice input and audio capture."
+        NSLocalNetworkUsageDescription: "Windows can reach local network services and DNS using this iPad's connection."
         UIBackgroundModes:
           - audio
         UISupportedInterfaceOrientations:

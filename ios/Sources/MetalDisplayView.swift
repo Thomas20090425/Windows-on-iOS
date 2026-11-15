@@ -321,6 +321,8 @@ final class MetalCanvasUIView: UIView, UIKeyInput {
         let w = max(1.0, bounds.width * scale)
         let h = max(1.0, bounds.height * scale)
         metalLayer.drawableSize = CGSize(width: w, height: h)
+        let screen = window?.screen ?? UIScreen.main
+        WinIOSBridge.shared.updateDisplayViewport(bounds.size, scale: screen.nativeScale, nativeSize: screen.nativeBounds.size)
         if let winBounds = window?.bounds.size, winBounds.width > 0 {
             WinIOSBridge.shared.updateScreenSize(winBounds, scale: scale)
         }

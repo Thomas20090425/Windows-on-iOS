@@ -1,6 +1,30 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import Foundation
 
+enum VMDisplayResolution: String, Codable, CaseIterable, Identifiable {
+    case native, window, hd, fullHD, qhd, uhd
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .native: return "Native screen"
+        case .window: return "Fit app window"
+        case .hd: return "1280 × 720"
+        case .fullHD: return "1920 × 1080"
+        case .qhd: return "2560 × 1440"
+        case .uhd: return "3840 × 2160"
+        }
+    }
+    var mode: Int { self == .native ? 1 : self == .window ? 2 : 0 }
+    var size: (width: Int, height: Int) {
+        switch self {
+        case .hd: return (1280, 720)
+        case .qhd: return (2560, 1440)
+        case .uhd: return (3840, 2160)
+        default: return (1920, 1080)
+        }
+    }
+}
+
 /// Runtime options understood by the existing engine.
 struct VMConfiguration: Codable, Equatable {
     var name: String = "Windows 11 ARM64"
@@ -12,6 +36,8 @@ struct VMConfiguration: Codable, Equatable {
     var sharedFolderEnabled: Bool = true
     var microphoneEnabled: Bool = false
     var displayRefreshRate: Int = 60
+    var displayResolution: VMDisplayResolution = .native
+    var dynamicResolution: Bool = true
     var diagnosticLogging: Bool = false
     var tcpForwardHostPort: Int = 0
     var tcpForwardGuestPort: Int = 0
@@ -26,6 +52,7 @@ struct VMConfiguration: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case name, memoryMB, cpuCount, networkEnabled, audioEnabled
         case primaryDiskReadOnly, sharedFolderEnabled, microphoneEnabled, displayRefreshRate
+        case displayResolution, dynamicResolution
         case diagnosticLogging, tcpForwardHostPort, tcpForwardGuestPort
         case touchTrackpad, commandToControl, pointerSensitivity
         case diskSizeGiB, installationISO
@@ -44,6 +71,8 @@ struct VMConfiguration: Codable, Equatable {
         sharedFolderEnabled = try values.decodeIfPresent(Bool.self, forKey: .sharedFolderEnabled) ?? sharedFolderEnabled
         microphoneEnabled = try values.decodeIfPresent(Bool.self, forKey: .microphoneEnabled) ?? microphoneEnabled
         displayRefreshRate = try values.decodeIfPresent(Int.self, forKey: .displayRefreshRate) ?? displayRefreshRate
+        displayResolution = try values.decodeIfPresent(VMDisplayResolution.self, forKey: .displayResolution) ?? displayResolution
+        dynamicResolution = try values.decodeIfPresent(Bool.self, forKey: .dynamicResolution) ?? dynamicResolution
         diagnosticLogging = try values.decodeIfPresent(Bool.self, forKey: .diagnosticLogging) ?? diagnosticLogging
         tcpForwardHostPort = try values.decodeIfPresent(Int.self, forKey: .tcpForwardHostPort) ?? tcpForwardHostPort
         tcpForwardGuestPort = try values.decodeIfPresent(Int.self, forKey: .tcpForwardGuestPort) ?? tcpForwardGuestPort
@@ -58,7 +87,10 @@ struct VMConfiguration: Codable, Equatable {
         ["primaryDiskReadOnly": NSNumber(value: primaryDiskReadOnly), "sharedFolderEnabled": NSNumber(value: sharedFolderEnabled),
          "microphoneEnabled": NSNumber(value: microphoneEnabled), "displayRefreshRate": NSNumber(value: displayRefreshRate),
          "diagnosticLogging": NSNumber(value: diagnosticLogging), "tcpForwardHostPort": NSNumber(value: tcpForwardHostPort),
-         "tcpForwardGuestPort": NSNumber(value: tcpForwardGuestPort)]
+         "tcpForwardGuestPort": NSNumber(value: tcpForwardGuestPort),
+         "displayResolutionMode": NSNumber(value: displayResolution.mode),
+         "displayWidth": NSNumber(value: displayResolution.size.width), "displayHeight": NSNumber(value: displayResolution.size.height),
+         "dynamicResolution": NSNumber(value: dynamicResolution)]
     }
 
     func validated() throws -> VMConfiguration {
@@ -108,7 +140,7 @@ enum VMMediaKind: String, CaseIterable, Identifiable {
 
 enum VMLibraryError: LocalizedError {
     case invalidName, invalidConfiguration, invalidMedia(String), alreadyExists(String), invalidDirectory
-    case missingBundledFirmware, insufficientStorage(required: Int64, available: Int64), cannotCreateDisk
+    case missingBundledFirmware, missingBundledDrivers, insufficientStorage(required: Int64, available: Int64), cannotCreateDisk
     case machineInUse
     var errorDescription: String? {
         switch self {
@@ -118,6 +150,7 @@ enum VMLibraryError: LocalizedError {
         case .alreadyExists(let file): return "\(file) already exists. Import into a new machine to preserve existing data."
         case .invalidDirectory: return "The machine must be inside Documents/Machines."
         case .missingBundledFirmware: return "This app build is missing its bundled UEFI firmware. Rebuild or reinstall WindowsiOS; no firmware import is required."
+        case .missingBundledDrivers: return "The bundled Windows ARM64 driver media is missing or damaged. Reinstall the current WindowsiOS build."
         case .insufficientStorage(let required, let available):
             let formatter = ByteCountFormatter()
             formatter.countStyle = .file

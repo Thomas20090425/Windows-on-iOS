@@ -26,6 +26,9 @@ typedef void (^WinIOSStateCallback)(void);
 @property (nonatomic, readonly) uint64_t maxGuestMemoryMB;
 @property (nonatomic, readonly) NSString *runtimeCapabilityText;
 @property (nonatomic, readonly) NSString *networkStatusText;
+@property (nonatomic, readonly) NSString *cpuModelName;
+@property (nonatomic, readonly) NSString *graphicsStatusText;
+@property (nonatomic, readonly) NSString *preferredResolutionText;
 @property (nonatomic, readonly) BOOL usbKeyboardReady;
 @property (nonatomic, readonly) BOOL usbTabletReady;
 @property (nonatomic, readonly) uint64_t usbEventsDelivered;
@@ -44,11 +47,13 @@ typedef void (^WinIOSStateCallback)(void);
 - (void)finishDeletingMachineDirectory:(NSString *)directory;
 - (BOOL)configureMachineDirectory:(NSString *)directory memoryMB:(uint64_t)memoryMB cpuCount:(NSInteger)cpuCount networkEnabled:(BOOL)networkEnabled audioEnabled:(BOOL)audioEnabled;
 - (BOOL)configureRuntimeOptions:(NSDictionary<NSString *, NSNumber *> *)options;
+- (BOOL)configureDisplayResolutionMode:(NSInteger)mode width:(NSInteger)width height:(NSInteger)height dynamicResolution:(BOOL)dynamic;
 - (BOOL)needsSparseUnpack;
 - (void)prepareAndStartWithLayer:(nullable CAMetalLayer *)layer;
 - (void)bindMetalLayer:(nullable CAMetalLayer *)layer;
 
 - (void)updateScreenSize:(CGSize)size scale:(CGFloat)scale;
+- (void)updateDisplayViewport:(CGSize)size scale:(CGFloat)scale nativeSize:(CGSize)nativeSize;
 - (void)updateHingeStatus:(NSInteger)status angleDegrees:(double)angleDegrees;
 
 - (void)sendTabletNormalizedX:(double)x y:(double)y buttons:(uint8_t)buttons wheel:(int8_t)wheel;

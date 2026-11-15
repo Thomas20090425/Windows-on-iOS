@@ -31,37 +31,40 @@ static void add_cap(HvVirtio *v, uint8_t at, uint8_t next, uint8_t type, uint32_
     }
 }
 
-static void reset(HvVirtio *v) {
+void hv_virtio_reset(HvVirtio *v) {
+    if (v->reset) v->reset(v);
     v->driver_features = 0;
     v->dfsel = v->gfsel = 0;
     v->status = 0;
     v->isr = 0;
     v->qsel = 0;
+    v->config_vector = 0xffff;
     for (int i = 0; i < v->nq; i++) v->q[i] = (HvVirtq){.size = HV_VIRTQ_MAX_SIZE};
+    for (int i = 0; i < HV_VIRTQ_MAX; i++) v->queue_vector[i] = 0xffff;
     hv_pci_set_intx(&v->pci, 0);
 }
 
-static uint64_t common_read(HvVirtio *v, uint64_t off) {
+static uint64_t common_read(HvVirtio *v, uint64_t off, unsigned size) {
     HvVirtq *q = v->qsel < v->nq ? &v->q[v->qsel] : NULL;
     switch (off) {
     case 0x00: return v->dfsel;
     case 0x04: return v->dfsel < 2 ? (uint32_t)(v->features >> (32 * v->dfsel)) : 0;
     case 0x08: return v->gfsel;
     case 0x0c: return v->gfsel < 2 ? (uint32_t)(v->driver_features >> (32 * v->gfsel)) : 0;
-    case 0x10: return 0xffff;                  /* config_msix_vector: no MSI-X */
+    case 0x10: return v->config_vector;
     case 0x12: return v->nq;
     case 0x14: return v->status;
     case 0x15: return v->config_gen;
     case 0x16: return v->qsel;
     case 0x18: return q ? q->size : 0;
-    case 0x1a: return 0xffff;
+    case 0x1a: return q ? v->queue_vector[v->qsel] : 0xffff;
     case 0x1c: return q ? q->enabled : 0;
     case 0x1e: return v->qsel;                 /* queue_notify_off = queue index */
-    case 0x20: return q ? (uint32_t)q->desc : 0;
+    case 0x20: return q ? (size == 8 ? q->desc : (uint32_t)q->desc) : 0;
     case 0x24: return q ? q->desc >> 32 : 0;
-    case 0x28: return q ? (uint32_t)q->avail : 0;
+    case 0x28: return q ? (size == 8 ? q->avail : (uint32_t)q->avail) : 0;
     case 0x2c: return q ? q->avail >> 32 : 0;
-    case 0x30: return q ? (uint32_t)q->used : 0;
+    case 0x30: return q ? (size == 8 ? q->used : (uint32_t)q->used) : 0;
     case 0x34: return q ? q->used >> 32 : 0;
     default: return 0;
     }
@@ -85,8 +88,11 @@ static void common_write(HvVirtio *v, uint64_t off, uint64_t val, unsigned size)
         }
         break;
     case 0x14:
-        if ((uint8_t)val == 0) reset(v);
+        if ((uint8_t)val == 0) hv_virtio_reset(v);
         else v->status = (uint8_t)val;
+        break;
+    case 0x10:
+        v->config_vector = val < v->pci.msix_nvec ? (uint16_t)val : 0xffff;
         break;
     case 0x16: v->qsel = (uint16_t)val; break;
     case 0x18:
@@ -98,6 +104,9 @@ static void common_write(HvVirtio *v, uint64_t off, uint64_t val, unsigned size)
             fprintf(stderr, "virtio %04x: queue %u size %llu\n", v->pci.config[2] | v->pci.config[3] << 8, v->qsel, (unsigned long long)val);
         break;
     case 0x1c: if (q) q->enabled = val & 1; break;
+    case 0x1a:
+        if (q) v->queue_vector[v->qsel] = val < v->pci.msix_nvec ? (uint16_t)val : 0xffff;
+        break;
     case 0x20: case 0x24: if (q) set64(&q->desc, off, val, size); break;
     case 0x28: case 0x2c: if (q) set64(&q->avail, off, val, size); break;
     case 0x30: case 0x34: if (q) set64(&q->used, off, val, size); break;
@@ -107,8 +116,8 @@ static void common_write(HvVirtio *v, uint64_t off, uint64_t val, unsigned size)
 
 static uint64_t bar_read(HvPciDev *d, int bar, uint64_t off, unsigned size) {
     HvVirtio *v = d->opaque;
-    if (bar != BAR) return ~0ull;
-    if (off < ISR) return common_read(v, off);
+    if (bar != BAR || !size || size > 8) return ~0ull;
+    if (off < ISR) return common_read(v, off, size);
     if (off < DEVICE) { /* ISR: reading clears it and drops the line */
         uint8_t isr = v->isr;
         v->isr = 0;
@@ -131,7 +140,7 @@ static uint64_t bar_read(HvPciDev *d, int bar, uint64_t off, unsigned size) {
 
 static void bar_write(HvPciDev *d, int bar, uint64_t off, uint64_t val, unsigned size) {
     HvVirtio *v = d->opaque;
-    if (bar != BAR) return;
+    if (bar != BAR || !size || size > 8) return;
     if (off < ISR) {
         common_write(v, off, val, size);
     } else if (off >= DEVICE && off < NOTIFY) {
@@ -158,12 +167,32 @@ void hv_virtio_init(HvVirtio *v, HvMachine *m, int device_id, uint32_t class_cod
     add_cap(v, 0x50, 0x60, 3, ISR, 1);
     add_cap(v, 0x60, 0x70, 4, DEVICE, 0x100);
     add_cap(v, 0x70, 0x00, 2, NOTIFY, NOTIFY_MULT * HV_VIRTQ_MAX);
-    reset(v);
+    hv_virtio_reset(v);
 }
 
 void hv_virtio_interrupt(HvVirtio *v) {
     v->isr |= 1;
     hv_pci_set_intx(&v->pci, 1);
+}
+
+void hv_virtio_enable_msix(HvVirtio *v, uint16_t vectors) {
+    hv_pci_add_bar(&v->pci, 1, 0x1000, 0);
+    hv_pci_add_msix(&v->pci, 0x84, 1, 0, 0x800, vectors);
+}
+
+void hv_virtio_queue_interrupt(HvVirtio *v, int q) {
+    if (q < 0 || q >= v->nq) return;
+    v->isr |= 1;
+    if (hv_pci_msix_enabled(&v->pci)) {
+        if (v->queue_vector[q] != 0xffff) hv_pci_msix_notify(&v->pci, v->queue_vector[q]);
+    } else hv_pci_set_intx(&v->pci, 1);
+}
+
+void hv_virtio_config_interrupt(HvVirtio *v) {
+    v->isr |= 2;
+    if (hv_pci_msix_enabled(&v->pci)) {
+        if (v->config_vector != 0xffff) hv_pci_msix_notify(&v->pci, v->config_vector);
+    } else hv_pci_set_intx(&v->pci, 1);
 }
 
 int hv_virtq_pop(HvVirtio *v, int qi, HvVirtqElem *e) {

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "acpi.h"
+#include "cpu_model.h"
 #include "tpm_crb.h"
 
 #include <stdio.h>
@@ -38,6 +39,7 @@ static void b_u8(Buf *b, uint8_t v) { b_put(b, &v, 1); }
 static void b_u16(Buf *b, uint16_t v) { b_put(b, &v, 2); }
 static void b_u32(Buf *b, uint32_t v) { b_put(b, &v, 4); }
 static void b_u64(Buf *b, uint64_t v) { b_put(b, &v, 8); }
+static void b_cstr(Buf *b, const char *value) { b_put(b, value, strlen(value) + 1); }
 
 static uint8_t acpi_cksum(const uint8_t *p, size_t len) {
     uint8_t sum = 0;
@@ -749,11 +751,11 @@ static void build_smbios(HvFwCfg *fw, int ncpus, uint64_t ram_size) {
         b_u8(&t, 6); /* Wake-up Type: Power Switch */
         b_u8(&t, 0); /* SKU */
         b_u8(&t, 5); /* Family */
-        b_put(&t, "Apple / WindowsiOS\0", 19);
-        b_put(&t, "iPhone Duo ARM64 PC\0", 20);
-        b_put(&t, "1.0\0", 4);
-        b_put(&t, "DUO-WIN11-ARM64\0", 16);
-        b_put(&t, "WindowsiOS\0", 11);
+        b_cstr(&t, "WindowsiOS");
+        b_cstr(&t, "WindowsiOS ARM64 Virtual Machine");
+        b_cstr(&t, "1.0");
+        b_cstr(&t, "WINIOS-ARM64-VM");
+        b_cstr(&t, "WindowsiOS");
         b_u8(&t, 0);
     }
 
@@ -776,8 +778,8 @@ static void build_smbios(HvFwCfg *fw, int ncpus, uint64_t ram_size) {
         b_u8(&t, 0);
         b_u8(&t, 0);
         b_u8(&t, 0);
-        b_put(&t, "Apple\0", 6);
-        b_put(&t, "iPhone19,4\0", 11);
+        b_cstr(&t, "WindowsiOS");
+        b_cstr(&t, "Virtual platform");
         b_u8(&t, 0);
     }
 
@@ -790,12 +792,12 @@ static void build_smbios(HvFwCfg *fw, int ncpus, uint64_t ram_size) {
         b_u8(&t, 3);
         b_u8(&t, 0xfe);
         b_u8(&t, 2);
-        b_u64(&t, 0x414fd0b1ULL);
+        b_u64(&t, HV_CPU_MIDR);
         b_u8(&t, 3);
         b_u8(&t, 0x8b);
-        b_u16(&t, 100U);
-        b_u16(&t, 4000U);
-        b_u16(&t, 3600U);
+        b_u16(&t, 0); /* No physical external clock is exposed by this VM. */
+        b_u16(&t, (uint16_t)HV_CPU_NOMINAL_CLOCK_MHZ);
+        b_u16(&t, (uint16_t)HV_CPU_NOMINAL_CLOCK_MHZ);
         b_u8(&t, 0x41);
         b_u8(&t, 1);
         b_u16(&t, 0xffffU);
@@ -807,11 +809,11 @@ static void build_smbios(HvFwCfg *fw, int ncpus, uint64_t ram_size) {
         b_u8(&t, (uint8_t)ncpus);
         b_u8(&t, (uint8_t)ncpus);
         b_u8(&t, (uint8_t)ncpus);
-        b_u16(&t, 0x0004U);
+        b_u16(&t, 0x0004U | (ncpus > 1 ? 0x0008U : 0)); /* 64-bit, optionally multicore */
         b_u16(&t, 0x0101U);
-        b_put(&t, "SOC0\0", 5);
-        b_put(&t, "Apple / ARM\0", 12);
-        b_put(&t, "Apple A20 Pro (WindowsiOS JIT)\0", 31);
+        b_cstr(&t, "VCPU0");
+        b_cstr(&t, HV_CPU_MANUFACTURER);
+        b_cstr(&t, HV_CPU_MODEL_NAME);
         b_u8(&t, 0);
     }
 

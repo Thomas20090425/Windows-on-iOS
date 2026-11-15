@@ -15,6 +15,7 @@ for tool in xcodegen xcrun make; do
     command -v "$tool" >/dev/null || { echo "Missing prerequisite: $tool" >&2; exit 1; }
 done
 python3 "$ROOT/scripts/prepare_firmware.py"
+python3 "$ROOT/scripts/prepare_windows_drivers.py"
 if [[ ! -f "$ROOT/ios/deps/lib/libslirp.a" ]]; then
     JOBS="$JOBS" "$ROOT/scripts/build_ios_deps.sh"
 fi
@@ -73,6 +74,8 @@ manifest = {
     'minimum_os': info['MinimumOSVersion'],
     'signing': 'development' if profile.exists() else 'unsigned',
     'runtime_validation': 'NOT RUN: compilation and packaging only',
+    'guest_cpu_model': 'Arm Cortex-A76 r4p1 (virtual)',
+    'graphics': 'VirtIO GPU 2D with firmware RAMFB fallback; no accelerated 3D',
 }
 firmware = app / 'Firmware' / 'provenance.json'
 if firmware.exists():
@@ -86,6 +89,10 @@ tpm = app / 'TPM' / 'provenance.json'
 if not tpm.exists():
     raise SystemExit('Built app is missing software TPM dependency provenance')
 manifest['software_tpm_dependencies'] = json.loads(tpm.read_text())
+drivers = app / 'WindowsDrivers' / 'provenance.json'
+if not drivers.exists():
+    raise SystemExit('Built app is missing bundled Windows ARM64 drivers')
+manifest['windows_drivers'] = json.loads(drivers.read_text())
 if profile.exists():
     payload = subprocess.check_output(['security', 'cms', '-D', '-i', str(profile)], stderr=subprocess.DEVNULL)
     provisioning = plistlib.loads(payload)

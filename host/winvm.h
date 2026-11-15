@@ -17,6 +17,7 @@ typedef struct HvWinVmConfig {
     const char *share_dir;    /* Optional host folder shared over WebDAV at http://10.0.2.4/ */
     const char *share_sock;   /* Path for internal WebDAV Unix domain socket */
     const char *tpm_state_dir; /* Optional persistent software TPM2 identity/state directory. */
+    const char *driver_disk; /* Read-only bundled Windows ARM64 driver media. */
     int ncpus;
     uint64_t ram_mb;
     size_t jit_bytes;
@@ -30,6 +31,7 @@ typedef struct HvWinVmConfig {
     int disk0_readonly;
     int disable_microphone;
     int display_refresh_hz;   /* 0 = 60 Hz; supported host presentation rates: 30/60/120 */
+    uint32_t display_width, display_height; /* Preferred VirtIO display mode, zero = 1920x1080. */
     int tcp_forward_host_port; /* 0 disables; otherwise loopback TCP only */
     int tcp_forward_guest_port;
 } HvWinVmConfig;
@@ -45,6 +47,9 @@ void hv_winvm_flush_disks(void);
 void hv_winvm_set_display_layer(void *ca_metal_layer);
 int hv_winvm_display_size(uint32_t *w, uint32_t *h);
 uint64_t hv_winvm_display_frames(void);
+int hv_winvm_set_display_mode(uint32_t width, uint32_t height);
+int hv_winvm_graphics_active(void);
+int hv_winvm_network_driver_ready(void);
 int hv_winvm_save_png(const char *path);
 
 /* Input hooks (any thread) */

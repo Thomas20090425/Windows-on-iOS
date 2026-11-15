@@ -331,6 +331,7 @@ struct VMConfigurationFields: View {
     var body: some View {
         Group {
             Section("System") {
+                LabeledContent("Virtual CPU model", value: WinIOSBridge.shared.cpuModelName)
                 Picker("Virtual CPUs", selection: $configuration.cpuCount) {
                     ForEach(1...4, id: \.self) { Text("\($0)").tag($0) }
                 }
@@ -355,6 +356,8 @@ struct VMConfigurationFields: View {
             }
             Section("Network") {
                 Toggle("NAT networking", isOn: $configuration.networkEnabled)
+                Text("Windows uses this iPad's internet connection through NAT. New installations receive the bundled ARM64 network and display drivers. In an existing Windows VM, open the WindowsiOS driver drive and run InstallDrivers.cmd as administrator once.")
+                    .font(.caption).foregroundStyle(.secondary)
                 TextField("TCP host port", text: $hostPort).keyboardType(.numberPad)
                 TextField("TCP Windows port", text: $guestPort).keyboardType(.numberPad)
                 Button("Save TCP Forward") { saveForward() }
@@ -362,6 +365,12 @@ struct VMConfigurationFields: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Display and audio") {
+                Picker("Windows resolution", selection: $configuration.displayResolution) {
+                    ForEach(VMDisplayResolution.allCases) { Text($0.title).tag($0) }
+                }
+                Toggle("Follow screen or window changes", isOn: $configuration.dynamicResolution)
+                Text("The bundled Windows display driver enables these modes and resolution changes inside Windows. Native screen uses the display's physical pixels; Fit app window follows the viewport. Changes apply after the display driver starts. 3D hardware acceleration is not available.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Picker("Presentation frame rate", selection: $configuration.displayRefreshRate) {
                     ForEach([30, 60, 120], id: \.self) { Text("\($0) Hz").tag($0) }
                 }

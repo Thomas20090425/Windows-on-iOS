@@ -11,6 +11,11 @@ enum VMBundledFirmware {
     }
 }
 
+enum VMBundledDrivers {
+    static var imageURL: URL? { Bundle.main.url(forResource: "drivers", withExtension: "img", subdirectory: "WindowsDrivers") }
+    static var manifestURL: URL? { Bundle.main.url(forResource: "provenance", withExtension: "json", subdirectory: "WindowsDrivers") }
+}
+
 extension VMLibraryFiles {
     /// Build an entirely new VM privately, then publish it after every file is ready.
     /// Existing VM directories and disks are never opened for writing here.

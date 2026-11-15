@@ -131,7 +131,8 @@ static const uint8_t tab_config_desc[34] = {
 };
 
 /* USB 2.0 high-speed, SCSI transparent Bulk-Only Transport. LUN0 is a
- * DVD-ROM; LUN1, when attached, is an immutable removable answer-file disk. */
+ * DVD-ROM; optional LUN1 contains guarded setup answers, and LUN2 contains
+ * bundled Windows drivers. The removable media are immutable. */
 static const uint8_t storage_device_desc[18] = {
     18, 1, 0x00, 0x02, 0, 0, 0, 64,
     0x27, 0x06, 0x03, 0x00, 0x00, 0x01, 1, 6, 7, 1,
@@ -150,7 +151,7 @@ static const char *const strings[] = {
     "KBD01",
     "WindowsiOS USB Tablet",
     "TAB01",
-    "WindowsiOS Installation Media",
+    "WindowsiOS Media and Drivers",
     "SETUP01",
 };
 
@@ -326,7 +327,7 @@ static int control(HvXhci *x, HvXhciSlot *sl, const uint8_t setup[8], uint8_t *o
             } else return -1;
         } else return -1;
     } else if (is_storage && type == 0xa1 && req == 0xfe) { /* GET_MAX_LUN */
-        tmp[0] = x->storage.media[1] ? 1 : 0;
+        tmp[0] = hv_usb_storage_max_lun(&x->storage);
         src = tmp, len = 1;
     } else if (is_storage && type == 0x21 && req == 0xff) { /* BULK_ONLY_RESET */
         hv_usb_storage_reset(&x->storage);
@@ -625,7 +626,7 @@ static int address_device(HvXhci *x, int slot, uint64_t input, int bsr) {
     rd(x, input + 64, ep0, 32);
     int port = slot_ctx[6]; /* root hub port number (1 or 2) */
     if (port < 1 || port > HV_XHCI_PORTS) return CC_TRB_ERROR;
-    if (port == 3 && !x->storage.media[0]) return CC_TRB_ERROR;
+    if (port == 3 && !hv_usb_storage_has_media(&x->storage)) return CC_TRB_ERROR;
 
     uint32_t dw3 = (uint32_t)(bsr ? 1 : 2) << 27 | (uint32_t)(bsr ? 0 : slot);
     memcpy(slot_ctx + 12, &dw3, 4);
@@ -795,7 +796,7 @@ static void run_commands(HvXhci *x) {
 
 static void ports_connect_init(HvXhci *x) {
     for (int p = 0; p < HV_XHCI_PORTS; p++) {
-        int connected = p < 2 || x->storage.media[0] != NULL;
+        int connected = p < 2 || hv_usb_storage_has_media(&x->storage);
         x->portsc[p] = PORT_PP | (connected ? PORT_CCS | PORT_CSC : 0) |
             ((uint32_t)(p == 2 ? SPEED_HIGH : SPEED_FULL) << PORT_SPEED_SHIFT) | (7u << PORT_PLS_SHIFT);
     }
@@ -1108,7 +1109,17 @@ void hv_xhci_poll(HvXhci *x) {
 
 void hv_xhci_attach_installer(HvXhci *x, HvDisk *iso, HvDisk *answer) {
     if (!x) return;
+    HvDisk *drivers = x->storage.media[2];
     hv_usb_storage_init(&x->storage, iso, answer);
+    x->storage.media[2] = drivers;
+    ports_connect_init(x);
+}
+
+void hv_xhci_attach_driver_disk(HvXhci *x, HvDisk *drivers) {
+    if (!x) return;
+    x->storage.media[2] = drivers;
+    x->storage.sense_key[2] = x->storage.sense_asc[2] = x->storage.sense_ascq[2] = 0;
+    hv_usb_storage_reset(&x->storage);
     ports_connect_init(x);
 }
 

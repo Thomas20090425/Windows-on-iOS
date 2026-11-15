@@ -17,6 +17,17 @@ was advancing slowly, projecting 22.2 minutes at that measured rate.
 
 ## Completed source work
 
+- Added official pinned ARM64 NetKVM/display packages and resolution helpers
+  as bundled read-only USB LUN2 media. Fresh setup stages drivers and attempts
+  permanent helper installation; existing VMs can run the included logged
+  installer once. Improved NAT startup/allocation failure handling and added
+  queue-specific MSI-X with INTx fallback for the network adapter.
+- Corrected guest CPU branding to Arm Cortex-A76 r4p1 (virtual), shared across
+  MIDR, FDT, SMBIOS and the app. Removed false host-chip/system names.
+- Added real VirtIO GPU 2D resources, cursor, scanout, EDID and mode-change
+  events, plus native/window/preset resolution controls. The official guest
+  service handles runtime modesets. Retained firmware RAMFB boot and added
+  framebuffer locking/update generations for dynamic scanout lifetime safety.
 - iPad VM Library, persistent machine configuration, staged imports, native
   settings and a resizable Metal session over the existing execution engine.
 - Native external keyboard/mouse/trackpad path, horizontal USB wheel, focus and
@@ -129,6 +140,13 @@ was advancing slowly, projecting 22.2 minutes at that measured rate.
   notices/provenance were inspected, and the local launch-symbol manifest was
   regenerated from the new Mach-O. No tests, debugger, simulator, device tunnel
   or VM execution. Device TPM enrollment/input/RAM behavior remain unverified.
+- Networking/display/CPU **signed Release build succeeded** with two workers.
+  Latest app/IPA/manifest are in `distribution/`; log:
+  `build/logs/ios-app-build-network-display-signed.log`. Bundled driver image
+  hash matches its manifest, actual GPU/media symbols are linked and local
+  launch metadata was regenerated. No driver, simulator, debugger, device or
+  VM execution; Internet access, guest driver trust and mode switching remain
+  runtime-unverified.
 
 ## Remaining external/runtime work
 
@@ -139,5 +157,5 @@ was advancing slowly, projecting 22.2 minutes at that measured rate.
   remain unverified. Windows Setup may reject other platform requirements.
   No requirement bypass or fabricated successful installation was added.
 - Pencil pressure/tilt/eraser/Windows Ink digitizer support, complete VM teardown,
-  suspend/snapshots, dynamic guest resolution and accelerated guest graphics
+  suspend/snapshots and accelerated 3D guest graphics
   remain unavailable. No speedup or universal iPad compatibility is claimed.

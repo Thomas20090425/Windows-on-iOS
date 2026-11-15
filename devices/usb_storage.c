@@ -19,6 +19,17 @@ static uint32_t block_size(const HvUsbStorage *s) { return s->lun ? 512 : 2048; 
 static uint64_t blocks(const HvUsbStorage *s) { return s->media[s->lun] ? s->media[s->lun]->size / block_size(s) : 0; }
 static int ready(const HvUsbStorage *s) { return blocks(s) > 0 && (s->lun || !s->optical_ejected); }
 
+int hv_usb_storage_has_media(const HvUsbStorage *s) {
+    for (unsigned i = 0; i < HV_USB_STORAGE_MEDIA; ++i) if (s->media[i]) return 1;
+    return 0;
+}
+
+uint8_t hv_usb_storage_max_lun(const HvUsbStorage *s) {
+    for (unsigned i = HV_USB_STORAGE_MEDIA; i > 0; --i)
+        if (s->media[i - 1]) return (uint8_t)(i - 1);
+    return 0;
+}
+
 void hv_usb_storage_reset(HvUsbStorage *s) {
     s->phase = HV_USB_STORAGE_CBW;
     s->cbw_used = s->response_length = s->response_offset = s->csw_offset = 0;
@@ -92,25 +103,32 @@ static void command(HvUsbStorage *s, const uint8_t *cdb) {
         response(s, 18, cdb[4]);
         s->sense_key[s->lun] = s->sense_asc[s->lun] = s->sense_ascq[s->lun] = 0;
         break;
-    case 0x12: /* INQUIRY */
+    case 0x12: { /* INQUIRY */
+        /* Distinct identities keep setup answers and the persistent repair
+         * driver volume separate in the guest's removable-storage stack. */
+        static const char serial[HV_USB_STORAGE_MEDIA][9] = {"WINISO01", "ANSWER01", "DRIVER01"};
+        static const char product[HV_USB_STORAGE_MEDIA][17] = {
+            "INSTALLER DVD   ", "SETUP ANSWER    ", "WINDOWS DRIVERS "
+        };
         r[0] = s->lun ? 0 : 5;
         if (cdb[1] & 1) {
             r[1] = cdb[2];
             if (cdb[2] == 0) { r[3] = 3; r[4] = 0; r[5] = 0x80; r[6] = 0x83; response(s, 7, cdb[4]); }
             else if (cdb[2] == 0x80) {
-                r[3] = 8; memcpy(r + 4, s->lun ? "ANSWER01" : "WINISO01", 8); response(s, 12, cdb[4]);
+                r[3] = 8; memcpy(r + 4, serial[s->lun], 8); response(s, 12, cdb[4]);
             } else if (cdb[2] == 0x83) {
                 r[3] = 12; r[4] = 2; r[5] = 0; r[7] = 8;
-                memcpy(r + 8, s->lun ? "ANSWER01" : "WINISO01", 8); response(s, 16, cdb[4]);
+                memcpy(r + 8, serial[s->lun], 8); response(s, 16, cdb[4]);
             } else fail(s, 5, 0x24);
         } else {
             r[1] = 0x80; r[2] = 5; r[3] = 2; r[4] = 31;
             memcpy(r + 8, "WINIOS  ", 8);
-            memcpy(r + 16, s->lun ? "SETUP ANSWER    " : "INSTALLER DVD   ", 16);
+            memcpy(r + 16, product[s->lun], 16);
             memcpy(r + 32, "1.00", 4);
             response(s, 36, cdb[4]);
         }
         break;
+    }
     case 0x1a: /* MODE SENSE(6) */
     case 0x5a: { /* MODE SENSE(10), CD capabilities + write-protect */
         int ten = cdb[0] == 0x5a, header = ten ? 8 : 4;
@@ -223,7 +241,7 @@ int hv_usb_storage_write(HvUsbStorage *s, const uint8_t *data, uint32_t length) 
     memcpy(s->cbw + s->cbw_used, data, length); s->cbw_used += length;
     if (s->cbw_used != sizeof s->cbw) return 0;
     const uint8_t *b = s->cbw;
-    if (le32(b) != 0x43425355 || (b[12] & 0x7f) || b[13] > 1 || (b[14] & 0xe0) || !(b[14] & 31) || (b[14] & 31) > 16) {
+    if (le32(b) != 0x43425355 || (b[12] & 0x7f) || b[13] >= HV_USB_STORAGE_MEDIA || (b[14] & 0xe0) || !(b[14] & 31) || (b[14] & 31) > 16) {
         s->phase = HV_USB_STORAGE_INVALID; return -1;
     }
     s->tag = le32(b + 4); s->host_length = s->residue = le32(b + 8);

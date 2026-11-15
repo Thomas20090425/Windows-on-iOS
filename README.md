@@ -36,6 +36,14 @@ device limit, with 3 GiB host headroom. Mouse buttons use direct hardware events
 and a UIKit trackpad path. F1–F12 are available onscreen; a connected physical
 keyboard hides the full software keyboard and leaves the F-key row.
 
+The current app also bundles official ARM64 NetKVM and display drivers with the
+VirtIO resolution service. It adds a real VirtIO GPU **2D** display, native /
+window-fit / preset modes and runtime resolution requests. Firmware boot keeps
+RAMFB; accelerated 3D and GPU passthrough are unavailable. CPU reporting now
+matches **Arm Cortex-A76 r4p1 (virtual)**. For existing VMs, install the app
+update, then run `InstallDrivers.cmd` as administrator from the WINIOSDRVS
+drive in Windows. See [driver/display setup](docs/WINDOWS_DRIVERS_AND_DISPLAY.md).
+
 JIT startup now requires an explicit readiness handshake from the supplied
 helper; ordinary Xcode Run displays setup status instead of emitting unhandled
 JIT breakpoints. Past VMs can be deleted with confirmation from the library.

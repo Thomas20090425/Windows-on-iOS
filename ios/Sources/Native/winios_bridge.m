@@ -5,9 +5,11 @@
 #include "share.h"
 #include "winios_jit.h"
 #include "guest_memory.h"
+#include "cpu_model.h"
 #include "winvm.h"
 #include <TargetConditionals.h>
 #include <fcntl.h>
+#include <math.h>
 #include <unistd.h>
 
 #import <AVFoundation/AVFoundation.h>
@@ -41,6 +43,12 @@ static WinIOSBridge *s_shared_bridge = nil;
     BOOL _microphoneEnabled;
     BOOL _diagnosticLogging;
     int _displayRefreshRate;
+    int _displayResolutionMode;
+    uint32_t _requestedDisplayWidth, _requestedDisplayHeight;
+    BOOL _dynamicResolution;
+    CGSize _displayViewportPoints, _displayNativePixels;
+    CGFloat _displayViewportScale;
+    NSUInteger _resolutionUpdateGeneration;
     int _tcpForwardHostPort;
     int _tcpForwardGuestPort;
     CAMetalLayer *__weak _pendingLayer;
@@ -59,6 +67,8 @@ static WinIOSBridge *s_shared_bridge = nil;
 - (void)updateUnpackProgress:(double)frac;
 - (void)startDiagTimer;
 - (void)stopDiagTimer;
+- (CGSize)preferredDisplaySize;
+- (void)requestPreferredDisplaySize;
 @end
 
 static void vm_exit_trampoline(int reason) {
@@ -103,6 +113,10 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         _requestedCPUs = 4;
         _networkEnabled = YES;
         _audioEnabled = YES;
+        _displayResolutionMode = 1;
+        _requestedDisplayWidth = 1920;
+        _requestedDisplayHeight = 1080;
+        _dynamicResolution = YES;
         _sharedFolderEnabled = YES;
         _microphoneEnabled = UIDevice.currentDevice.userInterfaceIdiom != UIUserInterfaceIdiomPad;
         _displayRefreshRate = 60;
@@ -195,6 +209,52 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     _hingeStatus = status;
     _hingeAngleDegrees = angleDegrees;
     os_unfair_lock_unlock(&_metricsLock);
+}
+
+- (CGSize)preferredDisplaySize {
+    os_unfair_lock_lock(&_metricsLock);
+    CGSize viewport = _displayViewportPoints.width > 0 ? _displayViewportPoints : _screenSizePts;
+    CGSize native = _displayNativePixels;
+    CGFloat scale = _displayViewportScale > 0 ? _displayViewportScale : _screenScale;
+    os_unfair_lock_unlock(&_metricsLock);
+    double width = _requestedDisplayWidth, height = _requestedDisplayHeight;
+    if (_displayResolutionMode == 1) {
+        if (native.width <= 0 || native.height <= 0) native = UIScreen.mainScreen.nativeBounds.size;
+        BOOL landscape = viewport.width > viewport.height;
+        width = landscape ? MAX(native.width, native.height) : MIN(native.width, native.height);
+        height = landscape ? MIN(native.width, native.height) : MAX(native.width, native.height);
+    } else if (_displayResolutionMode == 2 && viewport.width > 0 && viewport.height > 0 && scale > 0) {
+        width = viewport.width * scale;
+        height = viewport.height * scale;
+    }
+    if (!isfinite(width) || !isfinite(height) || width <= 0 || height <= 0) return CGSizeMake(1920, 1080);
+    /* EDID's base detailed timing has 12-bit active dimensions. Keep the
+     * native panel unchanged when representable; fit larger displays safely. */
+    double factor = MIN(1.0, MIN(4095.0 / width, 4095.0 / height));
+    width *= factor; height *= factor;
+    return CGSizeMake(MAX(640, lround(width)), MAX(480, lround(height)));
+}
+
+- (void)requestPreferredDisplaySize {
+    CGSize preferred = [self preferredDisplaySize];
+    if (_vmRunning) hv_winvm_set_display_mode((uint32_t)preferred.width, (uint32_t)preferred.height);
+}
+
+- (void)updateDisplayViewport:(CGSize)size scale:(CGFloat)scale nativeSize:(CGSize)nativeSize {
+    if (!isfinite(size.width) || !isfinite(size.height) || size.width <= 0 || size.height <= 0 ||
+        !isfinite(scale) || scale <= 0 || !isfinite(nativeSize.width) || !isfinite(nativeSize.height)) return;
+    os_unfair_lock_lock(&_metricsLock);
+    BOOL changed = !CGSizeEqualToSize(size, _displayViewportPoints) || scale != _displayViewportScale ||
+                   !CGSizeEqualToSize(nativeSize, _displayNativePixels);
+    _displayViewportPoints = size;
+    _displayViewportScale = scale;
+    _displayNativePixels = nativeSize;
+    os_unfair_lock_unlock(&_metricsLock);
+    if (!changed || !_vmRunning || !_dynamicResolution || _displayResolutionMode == 0) return;
+    NSUInteger generation = ++_resolutionUpdateGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        if (generation == self->_resolutionUpdateGeneration && self->_dynamicResolution) [self requestPreferredDisplaySize];
+    });
 }
 
 - (void)installTrapGuard {
@@ -321,7 +381,29 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 - (NSString *)networkStatusText {
     if (!_networkEnabled) return @"Disabled";
     if (!_vmRunning) return @"Not started";
-    return hv_winvm_network_up() ? @"NAT backend ready (guest NetKVM driver required)" : @"NAT backend unavailable; check configured host port and diagnostics";
+    if (!hv_winvm_network_up()) return @"NAT unavailable; check host-port configuration and diagnostics";
+    return hv_winvm_network_driver_ready() ? @"NetKVM initialized; NAT backend ready" : @"NAT ready; install NetKVM from the Windows driver disk";
+}
+
+- (NSString *)cpuModelName { return [NSString stringWithUTF8String:HV_CPU_MODEL_NAME]; }
+- (NSString *)graphicsStatusText {
+    if (!_vmRunning) return @"VirtIO GPU 2D; bundled ARM64 display driver";
+    return hv_winvm_graphics_active() ? @"VirtIO display active (2D)" : @"Firmware framebuffer; waiting for display driver";
+}
+- (NSString *)preferredResolutionText {
+    CGSize preferred = [self preferredDisplaySize];
+    return [NSString stringWithFormat:@"%.0f × %.0f", preferred.width, preferred.height];
+}
+
+- (BOOL)configureDisplayResolutionMode:(NSInteger)mode width:(NSInteger)width height:(NSInteger)height dynamicResolution:(BOOL)dynamic {
+    if (mode < 0 || mode > 2 || width < 640 || width > 4095 || height < 480 || height > 4095) return NO;
+    _displayResolutionMode = (int)mode;
+    _requestedDisplayWidth = (uint32_t)width;
+    _requestedDisplayHeight = (uint32_t)height;
+    _dynamicResolution = dynamic;
+    ++_resolutionUpdateGeneration;
+    [self requestPreferredDisplaySize];
+    return YES;
 }
 
 - (BOOL)configureRuntimeOptions:(NSDictionary<NSString *, NSNumber *> *)options {
@@ -330,8 +412,12 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     NSInteger hz = options[@"displayRefreshRate"] ? options[@"displayRefreshRate"].integerValue : 60;
     NSInteger hp = options[@"tcpForwardHostPort"].integerValue;
     NSInteger gp = options[@"tcpForwardGuestPort"].integerValue;
+    NSInteger mode = options[@"displayResolutionMode"] ? options[@"displayResolutionMode"].integerValue : 1;
+    NSInteger width = options[@"displayWidth"] ? options[@"displayWidth"].integerValue : 1920;
+    NSInteger height = options[@"displayHeight"] ? options[@"displayHeight"].integerValue : 1080;
     if ((hz != 30 && hz != 60 && hz != 120) ||
-        ((hp || gp) && (hp < 1024 || hp > 65535 || gp < 1 || gp > 65535))) {
+        ((hp || gp) && (hp < 1024 || hp > 65535 || gp < 1 || gp > 65535)) ||
+        mode < 0 || mode > 2 || width < 640 || width > 4095 || height < 480 || height > 4095) {
         _vmStatus = @"Choose 30/60/120 Hz and a TCP host port from 1024–65535 with a guest port from 1–65535, or set both ports to zero.";
         [self notifyChanged];
         return NO;
@@ -343,6 +429,8 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     _displayRefreshRate = (int)hz;
     _tcpForwardHostPort = (int)hp;
     _tcpForwardGuestPort = (int)gp;
+    [self configureDisplayResolutionMode:mode width:width height:height
+        dynamicResolution:options[@"dynamicResolution"] ? options[@"dynamicResolution"].boolValue : YES];
     return YES;
 }
 
@@ -636,16 +724,26 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     NSString *installerISO = [dir stringByAppendingPathComponent:@"installer.iso"];
     BOOL hasInstallerISO = [[NSFileManager defaultManager] fileExistsAtPath:installerISO];
     NSString *answerDisk = [dir stringByAppendingPathComponent:@"setup-support.img"];
+    NSString *driverDisk = [NSBundle.mainBundle pathForResource:@"drivers" ofType:@"img" inDirectory:@"WindowsDrivers"];
+    if (!driverDisk) {
+        _vmStatus = @"This app build is missing its bundled Windows ARM64 driver disk. Reinstall the current build.";
+        [self notifyChanged];
+        return;
+    }
     BOOL attachAnswers = hasInstallerISO && !hasSecondaryDisk && !_primaryDiskReadOnly &&
         [self shouldAttachAutomaticAnswersInDirectory:dir] && [[NSFileManager defaultManager] fileExistsAtPath:answerDisk];
 
     _configuredRamMB = ramMB;
     _configuredCPUs = _requestedCPUs;
+    CGSize preferredDisplay = [self preferredDisplaySize];
 
     HvWinVmConfig cfg = {
         .code_fd = codePath.fileSystemRepresentation,
         .vars_fd = varsPath.fileSystemRepresentation,
         .tpm_state_dir = tpmStatePath.fileSystemRepresentation,
+        .driver_disk = driverDisk.fileSystemRepresentation,
+        .display_width = (uint32_t)preferredDisplay.width,
+        .display_height = (uint32_t)preferredDisplay.height,
         .disk0 = diskPath.fileSystemRepresentation,
         .disk1 = hasSecondaryDisk ? secondaryDisk.fileSystemRepresentation : NULL,
         .share_dir = _sharedFolderEnabled && _networkEnabled ? sharedDir.fileSystemRepresentation : NULL,

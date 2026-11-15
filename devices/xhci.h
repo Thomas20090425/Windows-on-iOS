@@ -9,7 +9,7 @@
 /* xHCI 1.0 USB host controller (MSI-X + INTx) with:
    - Port 1: USB HID Boot Keyboard
    - Port 2: USB HID Absolute Tablet (0..32767 X/Y, L/R/M buttons, vertical/horizontal scroll wheels)
-   - Port 3: Optional USB Mass Storage installation media (optical ISO + answer disk)
+   - Port 3: USB Mass Storage media (optional optical ISO/answers, bundled drivers)
    Zero guest drivers required in EDK2 UEFI or Windows 11 ARM64. */
 #define HV_XHCI_SLOTS 8
 #define HV_XHCI_PORTS 3
@@ -75,6 +75,9 @@ HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus);
 /* Attach before starting vCPUs. LUN0 is an immutable ISO; optional LUN1 is the
  * app-created read-only removable answer disk. Firmware/Windows use inbox MSC. */
 void hv_xhci_attach_installer(HvXhci *x, HvDisk *iso, HvDisk *answer);
+/* Attach before starting vCPUs. Read-only LUN2 remains available with or without
+ * installation media, and is retained when guarded setup answers are removed. */
+void hv_xhci_attach_driver_disk(HvXhci *x, HvDisk *drivers);
 /* Drop unattended setup on the first warm reset after disk partitioning. */
 void hv_xhci_remove_installer_answer(HvXhci *x);
 /* Any thread: HID usage page 7 key down/up (e.g. 4 = A; 0xe0-0xe7 modifiers). */
