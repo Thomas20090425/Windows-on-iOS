@@ -89,7 +89,7 @@ rejects Xcode-managed profiles when forced into manual signing mode.
    | `vars.fd` | Private writable copy of the matching bundled UEFI variable template |
    | `windows11.img` | New sparse writable Windows disk at your selected capacity |
    | `installer.iso` | Read-only app-private copy of your selected ISO |
-   | `setup-support.img` | Small FAT answer disk for automatic Windows partitioning/install |
+   | `setup-support.img` | Private 64 MiB FAT16 driver-and-answer disk for automatic Windows partitioning/install |
    | App-bundled `WindowsDrivers/drivers.img` | Read-only ARM64 network/display drivers and resolution helper |
    | `installation-created.json` | Marker restricting automatic answers to the new app-created blank disk |
 

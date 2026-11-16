@@ -96,8 +96,9 @@ was advancing slowly, projecting 22.2 minutes at that measured rate.
   installing missing build prerequisites and guarding an unavailable hinge API.
 - Core baseline checks had completed before the user added the build-only
   constraint. No subsequent tests or runtime checks were performed.
-- Final integrated **signed build succeeded**; app, development IPA and manifest
-  are in `distribution/`. Final log: `build/logs/ios-app-build-jit-delete-signed.log`.
+- Earlier startup/deletion **signed build succeeded**; its app, development IPA
+  and manifest in `distribution/` were superseded by the later milestones below.
+  Milestone log: `build/logs/ios-app-build-jit-delete-signed.log`.
   Signature/package checks passed. Installation is limited to the embedded
   development profile's seven registered devices. Full evidence is in VALIDATION_REPORT.md.
 - Implementation milestone: `69b2e7e` — native iPad sessions, Pencil input and
@@ -134,8 +135,8 @@ was advancing slowly, projecting 22.2 minutes at that measured rate.
   exact-PID attach, stopped-state verification and a 60 s startup watchdog.
   Python/shell syntax compilation and independent source review passed. No app
   rebuild, debugger/device execution or runtime tests were performed.
-- Final software TPM/input **signed Release build succeeded** with two build
-  workers. App/IPA and updated manifest are in `distribution/`; log:
+- Software TPM/input milestone **signed Release build succeeded** with two build
+  workers. It produced the app/IPA and updated manifest in `distribution/`; log:
   `build/logs/ios-app-build-tpm-input-signed.log`. Real TPM symbols and bundled
   notices/provenance were inspected, and the local launch-symbol manifest was
   regenerated from the new Mach-O. No tests, debugger, simulator, device tunnel
@@ -152,7 +153,8 @@ was advancing slowly, projecting 22.2 minutes at that measured rate.
 
 - Install on an appropriately provisioned iPad; verify the JIT trap protocol,
   actual memory behavior, UEFI/Windows boot, physical input and guest I/O.
-- No suitable iPad/Duo was available. No Windows media was supplied locally.
+- No agent-run iPad/Duo runtime validation was performed under the build-only
+  constraint. No Windows media was supplied locally.
 - ISO boot/unattended setup and the new software TPM's firmware/Windows handoff
   remain unverified. Windows Setup may reject other platform requirements.
   No requirement bypass or fabricated successful installation was added.

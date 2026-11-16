@@ -1,61 +1,144 @@
-<div align="center">
-
 # WindowsiOS
 
-**Full Microsoft Windows 11 24H2 ARM64 running at near-native JIT speed on non-jailbroken modern iOS.**  
-*Verified end-to-end on the foldable **iPhone Duo** (`iPhone19,4` · Apple A20 Pro · iOS 27 TXM) — without `Hypervisor.framework`.*
+Windows 11 **24H2 ARM64** on iPad and the original iPhone Duo interface, using
+an ARM64 translation engine and debugger-assisted JIT.
 
-[![License: GPL v2+](https://img.shields.io/badge/License-GPL--2.0--or--later-blue.svg)](LICENSE)
-[![Guest OS](https://img.shields.io/badge/Guest-Windows_11_24H2_ARM64_(Build_26100)-0078D4.svg)](#visual-showcase)
-[![Engine](https://img.shields.io/badge/Engine-ARM64→ARM64_TXM_JIT_%2B_4KB_ASID_MMU-10B981.svg)](#what-was-original--hard--built-here-with-gemini-4-carbon)
-[![Built With](https://img.shields.io/badge/Built_With-Gemini_4_Carbon-7C3AED.svg)](#what-was-original--hard--built-here-with-gemini-4-carbon)
+**Current status: the universal arm64 iOS app compiles and signs successfully.
+The latest features are build-verified only. Windows installation/boot, device
+input, Internet access, TPM recognition and dynamic resolution remain unverified.**
+No near-native performance result is claimed for this update.
 
-</div>
+Development branch: [`codex/ipad-24h2-build`](https://github.com/Thomas20090425/Windows-on-iOS/tree/codex/ipad-24h2-build).
+Latest implementation revision: [`661b8ae`](https://github.com/Thomas20090425/Windows-on-iOS/commit/661b8ae).
+Start with [the agent handoff](AGENT_HANDOFF.md) to continue development, or
+[the changelog](CHANGELOG.md) for the complete change history.
 
-## Current universal app build
+## What the current app includes
 
-The 2026-11-15 build adds a native iPad VM Library/session, hardware input,
-Apple Pencil pointer input, host zoom and UTM-informed configuration while
-retaining the original Duo presentation and ARM64 engine. The device app and
-development IPA compile and sign successfully. **This update is build-verified
-only: iPad JIT, Windows boot and physical input have not been tested.**
-The showcase and performance claims below describe the upstream repository;
-they were not reproduced during this work.
+| Area | Implemented behavior and limits |
+| --- | --- |
+| Universal interface | Native iPad VM library, session and settings, with the original Duo presentation retained. Build targets iOS 17+; runtime eligibility and JIT still depend on the device/OS. |
+| ISO-only setup | Import your own Windows 11 24H2 ARM64 ISO, choose a 64–512 GiB disk, and let the app create the sparse disk, private UEFI variables and guarded unattended setup media. Firmware and Windows driver media are bundled. |
+| TPM 2.0 | Real libtpms software TPM, firmware FIFO/TIS and Windows CRB/ACPI discovery, with persistent state per VM. This is software TPM support; no hardware-backed attestation or successful Windows enrollment is claimed. |
+| RAM | Enter any whole MiB from 4096 to the displayed device limit, leaving 3072 MiB physical host headroom and respecting the board map. An existing JIT reservation requires relaunch to change. |
+| CPU identity | Consistent **Arm Cortex-A76 r4p1 (virtual)** in the app and guest platform tables. The model name describes the virtual CPU. |
+| Mouse and keyboard | Revised left/right/middle button handling, persistent held-button state and F1–F12 guest keys. Connecting a physical keyboard hides the full software keyboard and keeps the F-key row. Physical behavior needs device verification. |
+| Apple Pencil | Tip contact and supported hover act as pointer input. Pressure, tilt, eraser and Windows Ink pen identity need a future virtual digitizer implementation. A driver alone cannot add them. |
+| Networking | libslirp NAT with bundled official ARM64 NetKVM drivers and improved backend/error handling. Enable NAT in VM settings. Actual guest Internet access is unverified. |
+| Display | VirtIO GPU **2D**, native-screen/window-fit/preset resolutions and preferred-mode changes through the bundled Windows service. Firmware keeps RAMFB. No accelerated 3D/DirectX or Apple GPU passthrough. |
+| Mac JIT | UUID-matched local symbols, readiness handshake, progress reporting, batched USB debugger writes and bounded attach startup. A post-fix completion time has not been measured. |
+| VM deletion | Delete old machines with confirmation in the library. Running or engine-retained machines are protected until app relaunch. |
 
-Normal setup now requires only your **Windows 11 ARM64 ISO** and a selected
-disk capacity. The app includes matched, redistributable EDK2 firmware, creates
-private writable NVRAM and a sparse Windows disk, attaches the ISO as a USB DVD,
-and generates removable unattended setup media. No firmware or variable-store
-import is required. Software TPM 2.0 is now included using libtpms, with private
-persistent keys/NV state for each VM. Windows Setup/OOBE prompts and other
-platform requirements still apply. TPM enrollment and guest boot remain
-runtime-unverified; see the installation guide for limits.
+## Set up Windows
 
-Guest RAM accepts a custom whole-MiB allowance from 4096 MiB to the displayed
-device limit, with 3 GiB host headroom. Mouse buttons use direct hardware events
-and a UIKit trackpad path. F1–F12 are available onscreen; a connected physical
-keyboard hides the full software keyboard and leaves the F-key row.
+1. Install a development-signed app on a provisioned, supported device.
+2. Choose **New Machine**, enter the name/disk capacity, and select **Import
+   Windows ISO and Create**. Supply an ARM64 ISO; no separate firmware,
+   variable-store, disk-image or driver download is needed.
+3. Set the RAM, NAT and display options before starting. Initialize JIT using
+   the Mac launcher below, then select the VM and **Start** in the app.
+4. The app supplies guarded partition/install answers only for its own newly
+   created blank disk. Complete any Windows Setup/OOBE prompts and provide your
+   own Windows license. Automatic installation remains runtime-unverified.
 
-The current app also bundles official ARM64 NetKVM and display drivers with the
-VirtIO resolution service. It adds a real VirtIO GPU **2D** display, native /
-window-fit / preset modes and runtime resolution requests. Firmware boot keeps
-RAMFB; accelerated 3D and GPU passthrough are unavailable. CPU reporting now
-matches **Arm Cortex-A76 r4p1 (virtual)**. For existing VMs, install the app
-update, then run `InstallDrivers.cmd` as administrator from the WINIOSDRVS
-drive in Windows. See [driver/display setup](docs/WINDOWS_DRIVERS_AND_DISPLAY.md).
+For an **existing Windows VM**, update the app, open the **WINIOSDRVS** drive
+inside Windows, and run **InstallDrivers.cmd** as administrator once. Restart
+Windows if prompted. This installs NetKVM, the display driver and the official
+resolution service; it does not require reinstalling Windows. See
+[network/driver/display setup](docs/WINDOWS_DRIVERS_AND_DISPLAY.md).
 
-JIT startup now requires an explicit readiness handshake from the supplied
-helper; ordinary Xcode Run displays setup status instead of emitting unhandled
-JIT breakpoints. Past VMs can be deleted with confirmation from the library.
-Running or engine-retained machines are protected until the app is relaunched.
+Back up the Windows disk, `vars.fd`, the VM's `TPM/` directory and
+`tpm-state-initialized` marker together. Replacing established TPM state can
+break access to keys protected by it. Full engine teardown, suspend and
+snapshots are unavailable; another VM session requires an app relaunch.
 
-Use `JOBS=2 ./scripts/build_ios_app.sh` for a compile-only build. Add your
-`DEVELOPMENT_TEAM` for development signing. Outputs are in `distribution/`.
-See [iPad installation](IPAD_INSTALLATION.md), [verification evidence](VALIDATION_REPORT.md),
-[UTM configuration mapping](docs/UTM_CONFIGURATION_REVIEW.md), and
-[progress log](PROGRESS_LOG.md). Pencil pressure/tilt/eraser are not implemented.
+## Build and launch from a Mac
 
----
+Use full Xcode with the iOS SDK, its command-line tools, XcodeGen, Python 3 and
+the dependency prerequisites in [the installation guide](IPAD_INSTALLATION.md).
+The build script prepares pinned firmware, TPM dependencies and ARM64 driver
+resources automatically. Keep **two build workers** on this Mac.
+
+```sh
+git clone --branch codex/ipad-24h2-build https://github.com/Thomas20090425/Windows-on-iOS.git
+cd Windows-on-iOS
+JOBS=2 ./scripts/build_ios_app.sh
+```
+
+That produces an unsigned compile artifact. To build a development-signed app
+and IPA, use your own signing team/profile and registered device:
+
+```sh
+DEVELOPMENT_TEAM=YOUR_TEAM_ID JOBS=2 ./scripts/build_ios_app.sh
+```
+
+Outputs are `distribution/WindowsiOS.app`,
+`distribution/WindowsiOS-development.ipa` for a signed build, and
+`distribution/BUILD_INFO.json`. Build products, signing profiles, Windows media
+and VM data are ignored by Git; a fresh checkout must build/sign its own app.
+
+The following installation and launch commands are for the device owner to
+run when ready. Keep the device trusted, unlocked and connected by USB, with
+Developer Mode enabled. Use the exact local app bundle installed on the device:
+
+```sh
+./scripts/install_on_device.sh DEVICE_ID distribution/WindowsiOS.app
+./scripts/launch_on_device.sh DEVICE_ID me.ammaar.windowsios distribution/WindowsiOS.app
+```
+
+The launcher prepares its pinned Python environment on first use. Keep its
+terminal open, select a VM and press **Start** when prompted. Ordinary Xcode
+Run does not perform the custom JIT handshake. Reinstall a rebuilt app before
+using its matching local symbols. Current batched preparation still covers the
+entire 384 MiB JIT region; the earlier serial methods were slow, and the new
+path has no confirmed completion-time measurement. See
+[JIT troubleshooting and known limits](AGENT_HANDOFF.md).
+
+## Build evidence and documentation
+
+The latest **Release** build used Xcode 26.6, iOS SDK 26.5, generic arm64
+`iphoneos`, device families 1 and 2, and two workers. The log
+`build/logs/ios-app-build-network-display-signed.log` ends in `BUILD SUCCEEDED`;
+signature/package checks passed. The local development IPA SHA-256 is
+`5251bfa1a41465efcb1e7898412bdabd8effc79bc1097aaceb2c918bd9214d70`.
+The latest Debug evidence covers an earlier startup/deletion milestone only.
+
+**Development constraint: build only on this Mac. Do not run tests, simulators,
+debuggers, the app, VMs, profiling or benchmarks unless the owner changes this
+instruction.** Documentation updates do not rebuild or revalidate the app.
+
+| Document | Purpose |
+| --- | --- |
+| [AGENT_HANDOFF.md](AGENT_HANDOFF.md) | Portable context, source map, exact state, constraints, unresolved work and a continuation prompt for another agent. |
+| [CHANGELOG.md](CHANGELOG.md) | All implementation/documentation milestones and GitHub commit links. |
+| [IPAD_INSTALLATION.md](IPAD_INSTALLATION.md) | Prerequisites, signing, installation, ISO setup, controls and troubleshooting. |
+| [VALIDATION_REPORT.md](VALIDATION_REPORT.md) | Compile/package evidence and explicit runtime gaps. |
+| [PROGRESS_LOG.md](PROGRESS_LOG.md) | Detailed chronological implementation record. |
+| [Windows drivers and display](docs/WINDOWS_DRIVERS_AND_DISPLAY.md) | Existing-VM driver installation, NAT, native resolution and 2D graphics limits. |
+| [TPM provenance](docs/TPM_PROVENANCE.md) | libtpms/OpenSSL pins, state handling, entropy patch and licensing. |
+| [Firmware provenance](docs/FIRMWARE_PROVENANCE.md) | Matched EDK2 code/variable template, hashes and licenses. |
+| [UTM configuration review](docs/UTM_CONFIGURATION_REVIEW.md) | Configuration mapping and engine differences. |
+| [Third-party notices](THIRD_PARTY_NOTICES.md) | Upstream attribution and dependency licenses. |
+
+To continue with another agent, share this branch and ask it to read
+`AGENT_HANDOFF.md`, `README.md` and `VALIDATION_REPORT.md` before editing. The
+handoff includes a ready-to-copy prompt; it preserves context independently of
+this conversation.
+
+Source files retain their stated licenses, including GPL-2.0-or-later. The
+combined iOS build with OpenSSL 3 uses the GPL-3.0-or-later option; see
+[the linking notice](licenses/TPM-LINKING-NOTICE.txt) and
+[third-party notices](THIRD_PARTY_NOTICES.md). Windows installation media and
+licenses are supplied by the user.
+
+<details>
+<summary>Upstream showcase and historical engineering notes</summary>
+
+The following material is preserved from the upstream project. Its screenshots,
+performance statements, device claims and older provisioning commands were not
+reproduced or validated in this update. Use the current setup instructions above
+and the linked handoff; historical raw-disk/firmware-import procedures and old
+fixed RAM values are superseded.
 
 ## Visual Showcase
 
@@ -318,3 +401,5 @@ WindowsiOS/
 ## License
 
 `WindowsiOS` is free software licensed under the **GNU General Public License v2.0 or later** (`GPL-2.0-or-later`). See [`LICENSE`](LICENSE) for the full license text and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for complete upstream attributions and third-party license notices.
+
+</details>
