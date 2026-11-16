@@ -6,7 +6,8 @@
 #include <stdint.h>
 
 /* Build a QEMU-compatible ARM64 'virt' Flattened Device Tree (DTB) for EDK2 ArmVirtQemu.
- * Returns malloc'd buffer and sets *out_size, or NULL on error. */
-uint8_t *hv_fdt_build_virt(int ncpus, uint64_t ram_base, uint64_t ram_size, size_t *out_size);
+ * Returns malloc'd buffer and sets *out_size, or NULL on error. A nonzero
+ * tpm_present advertises the initialized backend's firmware TIS frontend. */
+uint8_t *hv_fdt_build_virt(int ncpus, uint64_t ram_base, uint64_t ram_size, size_t *out_size, int tpm_present);
 
 #endif

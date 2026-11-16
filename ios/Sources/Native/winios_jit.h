@@ -26,8 +26,12 @@ void winios_jit_install_trap_handler(void);
 bool winios_jit_is_debugger_attached(void);
 bool winios_jit_acquire(size_t bytes, bool detach_after);
 bool winios_jit_is_live(void);
+/* Debugger helper handshake; a normal Xcode debugger is not a JIT provider. */
+uint64_t winios_jit_helper_token_address(void);
 WinIosDualMapping winios_jit_mapping(void);
 void *winios_jit_guest_ram(uint64_t *out_bytes);
+/* Sets the next debugger-assisted RAM reservation; existing mappings are kept. */
+void winios_jit_set_guest_memory_mb(uint64_t memory_mb);
 const char *winios_jit_status_text(void);
 size_t winios_available_memory_bytes(void);
 

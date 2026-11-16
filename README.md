@@ -1,18 +1,171 @@
-<div align="center">
-
 # WindowsiOS
 
-**Full Microsoft Windows 11 24H2 ARM64 running at near-native JIT speed on non-jailbroken modern iOS.**  
-*Verified end-to-end on the foldable **iPhone Duo** (`iPhone19,4` · Apple A20 Pro · iOS 27 TXM) — without `Hypervisor.framework`.*
+Windows 11 **24H2 ARM64** on iPad and the original iPhone Duo interface, using
+an ARM64 translation engine and debugger-assisted JIT.
 
-[![License: GPL v2+](https://img.shields.io/badge/License-GPL--2.0--or--later-blue.svg)](LICENSE)
-[![Guest OS](https://img.shields.io/badge/Guest-Windows_11_24H2_ARM64_(Build_26100)-0078D4.svg)](#visual-showcase)
-[![Engine](https://img.shields.io/badge/Engine-ARM64→ARM64_TXM_JIT_%2B_4KB_ASID_MMU-10B981.svg)](#what-was-original--hard--built-here-with-gemini-4-carbon)
-[![Built With](https://img.shields.io/badge/Built_With-Gemini_4_Carbon-7C3AED.svg)](#what-was-original--hard--built-here-with-gemini-4-carbon)
+**Current status: the universal arm64 iOS app compiles and signs successfully.
+The latest features are build-verified only. Windows installation/boot, device
+input, Internet access, TPM recognition and dynamic resolution remain unverified.**
+No near-native performance result is claimed for this update.
 
-</div>
+Canonical branch: [`main`](https://github.com/Thomas20090425/Windows-on-iOS/tree/main).
+Latest implementation revision: [`661b8ae`](https://github.com/Thomas20090425/Windows-on-iOS/commit/661b8ae).
+Start with [the agent handoff](AGENT_HANDOFF.md) to continue development, or
+[the changelog](CHANGELOG.md) for the complete change history.
 
----
+## Download and build
+
+[**Download the complete source ZIP**](https://github.com/Thomas20090425/Windows-on-iOS/archive/refs/heads/main.zip),
+unzip it, and double-click **[Build.command](Build.command)** on your Mac.
+Install full Xcode with its iOS SDK and Homebrew first. The command checks the
+Xcode setup, installs missing Homebrew build tools, downloads/builds the
+required dependencies and produces `distribution/WindowsiOS.app` with two
+build workers. The first build needs Internet access and can take some time.
+
+The default is an **unsigned compile build**. Installing on your iPad/iPhone
+requires your own Apple development signing team and provisioned device; see
+[build and signing](#build-and-launch-from-a-mac). The command does not run
+tests, launch a VM or install anything on a device.
+
+All application/engine source, dependency preparation scripts and build
+configuration are in the repository. The Xcode project is generated from the
+tracked `ios/project.yml`; generated projects, downloaded dependencies and
+compiled app/IPA files are excluded from Git and recreated by the build.
+Your Windows ISO is supplied separately.
+
+## What the current app includes
+
+| Area | Implemented behavior and limits |
+| --- | --- |
+| Universal interface | Native iPad VM library, session and settings, with the original Duo presentation retained. Build targets iOS 17+; runtime eligibility and JIT still depend on the device/OS. |
+| ISO-only setup | Import your own Windows 11 24H2 ARM64 ISO, choose a 64–512 GiB disk, and let the app create the sparse disk, private UEFI variables and guarded unattended setup media. Firmware and Windows driver media are bundled. |
+| TPM 2.0 | Real libtpms software TPM, firmware FIFO/TIS and Windows CRB/ACPI discovery, with persistent state per VM. This is software TPM support; no hardware-backed attestation or successful Windows enrollment is claimed. |
+| RAM | Enter any whole MiB from 4096 to the displayed device limit, leaving 3072 MiB physical host headroom and respecting the board map. An existing JIT reservation requires relaunch to change. |
+| CPU identity | Consistent **Arm Cortex-A76 r4p1 (virtual)** in the app and guest platform tables. The model name describes the virtual CPU. |
+| Mouse and keyboard | Revised left/right/middle button handling, persistent held-button state and F1–F12 guest keys. Connecting a physical keyboard hides the full software keyboard and keeps the F-key row. Physical behavior needs device verification. |
+| Apple Pencil | Tip contact and supported hover act as pointer input. Pressure, tilt, eraser and Windows Ink pen identity need a future virtual digitizer implementation. A driver alone cannot add them. |
+| Networking | libslirp NAT with bundled official ARM64 NetKVM drivers and improved backend/error handling. Enable NAT in VM settings. Actual guest Internet access is unverified. |
+| Display | VirtIO GPU **2D**, native-screen/window-fit/preset resolutions and preferred-mode changes through the bundled Windows service. Firmware keeps RAMFB. No accelerated 3D/DirectX or Apple GPU passthrough. |
+| Mac JIT | UUID-matched local symbols, readiness handshake, progress reporting, batched USB debugger writes and bounded attach startup. A post-fix completion time has not been measured. |
+| VM deletion | Delete old machines with confirmation in the library. Running or engine-retained machines are protected until app relaunch. |
+
+## Set up Windows
+
+1. Install a development-signed app on a provisioned, supported device.
+2. Choose **New Machine**, enter the name/disk capacity, and select **Import
+   Windows ISO and Create**. Supply an ARM64 ISO; no separate firmware,
+   variable-store, disk-image or driver download is needed.
+3. Set the RAM, NAT and display options before starting. Initialize JIT using
+   the Mac launcher below, then select the VM and **Start** in the app.
+4. The app supplies guarded partition/install answers only for its own newly
+   created blank disk. Complete any Windows Setup/OOBE prompts and provide your
+   own Windows license. Automatic installation remains runtime-unverified.
+
+For an **existing Windows VM**, update the app, open the **WINIOSDRVS** drive
+inside Windows, and run **InstallDrivers.cmd** as administrator once. Restart
+Windows if prompted. This installs NetKVM, the display driver and the official
+resolution service; it does not require reinstalling Windows. See
+[network/driver/display setup](docs/WINDOWS_DRIVERS_AND_DISPLAY.md).
+
+Back up the Windows disk, `vars.fd`, the VM's `TPM/` directory and
+`tpm-state-initialized` marker together. Replacing established TPM state can
+break access to keys protected by it. Full engine teardown, suspend and
+snapshots are unavailable; another VM session requires an app relaunch.
+
+## Build and launch from a Mac
+
+Use full Xcode with its iOS SDK and Homebrew. Double-click **Build.command**
+in the downloaded folder, or run it from Terminal after cloning `main`:
+
+```sh
+git clone https://github.com/Thomas20090425/Windows-on-iOS.git
+cd Windows-on-iOS
+./Build.command
+```
+
+The entry point prepares missing build tools and calls the existing compile
+script. It keeps **two build workers** by default. If macOS asks how to open
+the downloaded command, open it with Terminal or run `bash Build.command` in
+that folder. See [the installation guide](IPAD_INSTALLATION.md) for prerequisites.
+
+That produces an unsigned compile artifact. To build a development-signed app
+and IPA, use your own signing team/profile and registered device:
+
+```sh
+DEVELOPMENT_TEAM=YOUR_TEAM_ID JOBS=2 ./Build.command
+```
+
+If the build tools are already installed, the direct compile entry point remains
+`JOBS=2 ./scripts/build_ios_app.sh`. Both paths prepare pinned firmware, TPM
+dependencies and ARM64 driver resources automatically.
+
+Outputs are `distribution/WindowsiOS.app`,
+`distribution/WindowsiOS-development.ipa` for a signed build, and
+`distribution/BUILD_INFO.json`. Build products, signing profiles, Windows media
+and VM data are ignored by Git; a fresh checkout must build/sign its own app.
+
+The following installation and launch commands are for the device owner to
+run when ready. Keep the device trusted, unlocked and connected by USB, with
+Developer Mode enabled. Use the exact local app bundle installed on the device:
+
+```sh
+./scripts/install_on_device.sh DEVICE_ID distribution/WindowsiOS.app
+./scripts/launch_on_device.sh DEVICE_ID me.ammaar.windowsios distribution/WindowsiOS.app
+```
+
+The launcher prepares its pinned Python environment on first use. Keep its
+terminal open, select a VM and press **Start** when prompted. Ordinary Xcode
+Run does not perform the custom JIT handshake. Reinstall a rebuilt app before
+using its matching local symbols. Current batched preparation still covers the
+entire 384 MiB JIT region; the earlier serial methods were slow, and the new
+path has no confirmed completion-time measurement. See
+[JIT troubleshooting and known limits](AGENT_HANDOFF.md).
+
+## Build evidence and documentation
+
+The latest **Release** build used Xcode 26.6, iOS SDK 26.5, generic arm64
+`iphoneos`, device families 1 and 2, and two workers. The log
+`build/logs/ios-app-build-network-display-signed.log` ends in `BUILD SUCCEEDED`;
+signature/package checks passed. The local development IPA SHA-256 is
+`5251bfa1a41465efcb1e7898412bdabd8effc79bc1097aaceb2c918bd9214d70`.
+The latest Debug evidence covers an earlier startup/deletion milestone only.
+
+**Development constraint: build only on this Mac. Do not run tests, simulators,
+debuggers, the app, VMs, profiling or benchmarks unless the owner changes this
+instruction.** Documentation updates do not rebuild or revalidate the app.
+
+| Document | Purpose |
+| --- | --- |
+| [AGENT_HANDOFF.md](AGENT_HANDOFF.md) | Portable context, source map, exact state, constraints, unresolved work and a continuation prompt for another agent. |
+| [CHANGELOG.md](CHANGELOG.md) | All implementation/documentation milestones and GitHub commit links. |
+| [IPAD_INSTALLATION.md](IPAD_INSTALLATION.md) | Prerequisites, signing, installation, ISO setup, controls and troubleshooting. |
+| [VALIDATION_REPORT.md](VALIDATION_REPORT.md) | Compile/package evidence and explicit runtime gaps. |
+| [PROGRESS_LOG.md](PROGRESS_LOG.md) | Detailed chronological implementation record. |
+| [Windows drivers and display](docs/WINDOWS_DRIVERS_AND_DISPLAY.md) | Existing-VM driver installation, NAT, native resolution and 2D graphics limits. |
+| [TPM provenance](docs/TPM_PROVENANCE.md) | libtpms/OpenSSL pins, state handling, entropy patch and licensing. |
+| [Firmware provenance](docs/FIRMWARE_PROVENANCE.md) | Matched EDK2 code/variable template, hashes and licenses. |
+| [UTM configuration review](docs/UTM_CONFIGURATION_REVIEW.md) | Configuration mapping and engine differences. |
+| [Third-party notices](THIRD_PARTY_NOTICES.md) | Upstream attribution and dependency licenses. |
+
+To continue with another agent, share `main` and ask it to read
+`AGENT_HANDOFF.md`, `README.md` and `VALIDATION_REPORT.md` before editing. The
+handoff includes a ready-to-copy prompt; it preserves context independently of
+this conversation.
+
+Source files retain their stated licenses, including GPL-2.0-or-later. The
+combined iOS build with OpenSSL 3 uses the GPL-3.0-or-later option; see
+[the linking notice](licenses/TPM-LINKING-NOTICE.txt) and
+[third-party notices](THIRD_PARTY_NOTICES.md). Windows installation media and
+licenses are supplied by the user.
+
+<details>
+<summary>Upstream showcase and historical engineering notes</summary>
+
+The following material is preserved from the upstream project. Its screenshots,
+performance statements, device claims and older provisioning commands were not
+reproduced or validated in this update. Use the current setup instructions above
+and the linked handoff; historical raw-disk/firmware-import procedures and old
+fixed RAM values are superseded.
 
 ## Visual Showcase
 
@@ -108,7 +261,7 @@ flowchart TB
     end
 
     subgraph Host["Non-Jailbroken iOS 26/27 TXM Host — Foldable iPhone Duo (iPhone19,4 · A20 Pro)"]
-        TXM["384 MiB Dual-Mapped RX/RW TXM JIT (< 0x7000000000) + 4.5 GB Ledger-Exempt Guest RAM"]
+        TXM["384 MiB Dual-Mapped RX/RW TXM JIT (< 0x7000000000) + Configured Guest RAM"]
         UI["Midnight-Sapphire Surface Laptop Ultra UI (UIHingeInteraction Clamshell / Open Studio + 120Hz Metal)"]
         IOSIO["CoreAudio RemoteIO + AudioQueueInput · SFSafariViewController Passkey/Google OAuth Sheet"]
     end
@@ -159,9 +312,9 @@ Windows 11 24H2 refuses FDT/DeviceTree boot and demands a compliant ServerReady/
   - Full CORB/RIRB verb ring engines, 24.000 MHz `WALCLK`, DMA Position Buffer (`DPLBASE`/`DPUBASE`), `LPIB`, and scatter-gather BDL streams.
 - Windows 11 binds inbox `hdaudbus.sys` + `HdAudio.sys` automatically on first boot, streaming lock-free 48 kHz S16LE playback to iOS `RemoteIO` (`AudioUnit`) and live microphone capture from iOS `AudioQueueNewInput` (`AVAudioSessionCategoryPlayAndRecord`).
 
-### 6. 384 MiB TXM Dual-Mapped JIT + 4.5 GB Ledger-Exempt RAM + Featherweight Windows 11 ([`ios/Sources/Native/winios_jit.c`](ios/Sources/Native/winios_jit.c), [`tools/opt_hive_arm64.c`](tools/opt_hive_arm64.c), [`scripts/optimize_windows_lite.py`](scripts/optimize_windows_lite.py))
-- **TXM Low-VA Reservation & Ledger-Exempt RAM:** On iOS 26/27 TXM devices, executable JIT mappings placed above `0x7000000000` hang in hardware. `winios_jit.c` reserves a static zero-fill region in `__DATA` below `0x180000000` at Mach-O load time, releases it right before `debugserver` `_M<size>,rx` allocation to claim a **384 MiB RX/RW dual-mapped JIT**, and uses `mach_make_memory_entry_64` + `mach_memory_entry_ownership(..., LEDGER_NO_FOOTPRINT)` (`hv_alloc_no_footprint`) while `CS_DEBUGGED` is active to pre-allocate **4,608 MiB (4.5 GB) of Jetsam-exempt Guest RAM** before LLDB detaches — leaving **~2–3 GB of free iOS Jetsam headroom**.
-- **Featherweight Offline Hive Surgery (`1.46 GB` Idle RAM):** Using an offline WinPE environment plus a custom freestanding ARM64 Win32 tool (`tools/opt_hive_arm64.c`, opening `SYSTEM`/`SOFTWARE` hives with `SeBackupPrivilege` + `SeRestorePrivilege` + `REG_OPTION_BACKUP_RESTORE` to bypass `TrustedInstaller` DACLs cleanly), `optimize_windows_lite.py` strips 35+ background UWP/telemetry/Defender/indexer hogs and KVA Shadow overhead — bringing Windows 11 24H2 idle desktop memory down to **`1.46 GB / 4.5 GB` (`~31.7%`)** and **`89%` WFI idle** across 4 A20 Pro performance-core vCPUs, packed into a compact `hvsparse` block image (`host/hvsparse.c`).
+### 6. 384 MiB TXM Dual-Mapped JIT + Configured Guest RAM ([`ios/Sources/Native/winios_jit.c`](ios/Sources/Native/winios_jit.c), [`scripts/optimize_windows_lite.py`](scripts/optimize_windows_lite.py))
+- **TXM low-address reservation and configured RAM:** The iOS allocator reserves low address space before the debugger requests its **384 MiB RX/RW JIT**. During the matching helper session it attempts `hv_alloc_no_footprint` for the selected whole-MiB guest RAM allowance, leaving 3 GiB physical host headroom. Allocation and the memory-ledger behavior are OS-dependent; the app checks the actual reservation and does not promise immunity from Jetsam or silently reduce the selected RAM.
+- **Current Windows cleanup:** Optional consumer-app and visual cleanup preserves Defender, SmartScreen, Windows Update, code integrity and CPU mitigations. It no longer invokes the legacy security-disabling hive helper. No idle-RAM or performance result has been measured for this revised profile. iPad RAM admission and debugger reservation remain subject to physical-device verification.
 
 ### 7. Foldable iPhone Duo Surface Laptop Ultra UI + Native iOS `SafariSheet` OAuth Bridge ([`ios/Sources/`](ios/Sources/), [`tools/winios_browser_arm64.c`](tools/winios_browser_arm64.c))
 - **Posture-Aware Foldable UI:** Hooks iOS 27's `UIHingeInteraction` (`HingeSensorView.swift`) on the foldable iPhone Duo to transition fluidly between:
@@ -185,7 +338,9 @@ Windows 11 24H2 refuses FDT/DeviceTree boot and demands a compliant ServerReady/
 | `0x080A_0000` | `15 MiB` | ARM GICv3 Per-vCPU Redistributors (`GICR`) | [`devices/gicv3.c`](devices/gicv3.c) |
 | `0x0900_0000` | `64 KiB` | PrimeCell `PL011` UART, `PL031` RTC (`0x09010000`), `fw_cfg` + `ramfb` (`0x09020000`), `PL061` GPIO (`0x09030000`), ACPI GED (`0x09080000`) | [`devices/winvirt.c`](devices/winvirt.c) |
 | `0x1000_0000` | `752 MiB` | PCIe 32-bit MMIO Window + PIO (`0x3EFF0000`) | [`devices/pcie.c`](devices/pcie.c) |
-| `0x4000_0000` | `4.5 GiB` | Guest System DRAM (`hv_alloc_no_footprint` on iOS) | [`devices/winvirt.c`](devices/winvirt.c) |
+| `0x090C_0000` | `64 KiB` | Software TPM 2.0 CRB (Windows ACPI) | [`devices/tpm_crb.c`](devices/tpm_crb.c) |
+| `0x090D_0000` | `64 KiB` | Same TPM's FIFO/TIS frontend (EDK2 device tree) | [`devices/tpm_crb.c`](devices/tpm_crb.c) |
+| `0x4000_0000` | Custom allowance | Guest System DRAM (`hv_alloc_no_footprint` on iOS) | [`devices/winvirt.c`](devices/winvirt.c) |
 | `0x40_1000_0000` | `256 MiB` | PCIe ECAM Configuration Space (`MCFG`) | [`devices/pcie.c`](devices/pcie.c) |
 | `0x80_0000_0000` | `512 GiB` | PCIe 64-bit High MMIO BAR Window | [`devices/pcie.c`](devices/pcie.c) |
 
@@ -200,7 +355,7 @@ Windows 11 24H2 refuses FDT/DeviceTree boot and demands a compliant ServerReady/
 
 ## Building, Provisioning & Deploying
 
-> **Note:** No disk images (`*.img`, `*.hvsparse`), UEFI firmware binaries (`*.fd`), or Windows/driver ISOs (`*.esd`, `*.iso`, `*.exe`) are stored in git. All large artifacts live exclusively inside `work/` and `build/` (enforced by [`.gitignore`](.gitignore)).
+> **Note:** No disk images (`*.img`, `*.hvsparse`), UEFI firmware binaries (`*.fd`), or Windows/driver ISOs (`*.esd`, `*.iso`, `*.exe`) are stored in git. Local media/build artifacts live in ignored `work/`, `build/`, `ios/deps/` and `distribution/` directories.
 
 ### Prerequisites
 - macOS on Apple Silicon (`M1` or newer; developed on M5 Pro) with Xcode, `xcodegen`, `meson`, `ninja`, `pkg-config`, `libslirp`, `llvm`/`lld` (for compiling freestanding `AArch64` Win32 guest helpers), and Python 3.
@@ -215,12 +370,13 @@ Windows 11 24H2 refuses FDT/DeviceTree boot and demands a compliant ServerReady/
 make -j8 all ios-lib test-core
 ```
 
-### 2. Provision & Optimize Featherweight Windows 11 24H2 ARM64 Image
+### 2. Provision Windows 11 24H2 ARM64 Image (Requires a Capable Host)
 ```bash
 # Unattended WinPE DISM + NetKVM injection + BCDBOOT UEFI NVRAM provisioning -> work/windows11.img + work/vars.fd
 /opt/homebrew/bin/python3 scripts/provision_windows_arm64.py
 
-# Offline WinPE DISM bloat removal + SeRestorePrivilege registry hive surgery -> work/windows11_lite.img (1.46 GB idle RAM)
+# Optional offline consumer-app and visual cleanup; preserves security defaults.
+# Refuses to overwrite an existing work/windows11_lite.img. Runs a VM separately from app compilation.
 /opt/homebrew/bin/python3 scripts/optimize_windows_lite.py
 
 # Pack into fast zero-skipping sparse container for iOS transfer -> work/windows11.hvsparse
@@ -272,3 +428,5 @@ WindowsiOS/
 ## License
 
 `WindowsiOS` is free software licensed under the **GNU General Public License v2.0 or later** (`GPL-2.0-or-later`). See [`LICENSE`](LICENSE) for the full license text and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for complete upstream attributions and third-party license notices.
+
+</details>

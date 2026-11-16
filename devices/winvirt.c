@@ -117,12 +117,17 @@ static void uart_stdout_cb(void *opaque, uint8_t c) {
 
 int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_t ram_size,
                       void *prealloc_ram, const char *code_fd_path, const char *vars_fd_path,
-                      HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound) {
+                      HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound,
+                      const char *tpm_state_dir, char *error, size_t error_size) {
     memset(b, 0, sizeof *b);
     b->m = m;
     b->cpu = cpu;
     b->ncpus = ncpus < 1 ? 1 : ncpus > HV_MAX_CPUS ? HV_MAX_CPUS : ncpus;
     b->ram_size = ram_size;
+    if (tpm_state_dir && *tpm_state_dir) {
+        b->tpm = hv_tpm_crb_create(m, HV_TPM_CRB_BASE, tpm_state_dir, error, error_size);
+        if (!b->tpm) return -1;
+    }
 
     /* 1. Allocate Guest RAM (pre-allocated ledger-exempt on iOS, debugger ledger-exempt, file-backed, or anon mmap) */
     const char *ram_file = getenv("HV_RAM_FILE");
@@ -155,7 +160,7 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
     if (b->ram == MAP_FAILED) return -1;
 
     /* 2. Build Flattened Device Tree (placed at 0x40000000 on every reset) */
-    b->dtb = hv_fdt_build_virt(b->ncpus, WINVIRT_RAM_PA, ram_size, &b->dtb_size);
+    b->dtb = hv_fdt_build_virt(b->ncpus, WINVIRT_RAM_PA, ram_size, &b->dtb_size, b->tpm != NULL);
     if (!b->dtb || b->dtb_size > ram_size) return -1;
 
     /* 3. Flash banks: pflash0 (64 MB read-only UEFI code HvRam) & pflash1 (64 MB persistent CFI01 NVRAM) */
@@ -186,7 +191,7 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
 
     b->fw_cfg = hv_fw_cfg_create(m, WINVIRT_FW_CFG_PA, (uint16_t)ncpus);
     b->fb = hv_fb_display_create(m, b->fw_cfg);
-    hv_acpi_build_and_register(b->fw_cfg, b->ncpus, ram_size, 0, 0);
+    hv_acpi_build_and_register(b->fw_cfg, b->ncpus, ram_size, 0, 0, b->tpm != NULL);
 
     /* 7. PCIe Root Complex (GPEX):
      *    Slot 0: Host Bridge (1b36:0008)

@@ -22,6 +22,11 @@
 #define IN_BUFFER_FRAMES 960 /* 20 ms @ 48 kHz */
 
 static pthread_mutex_t audio_mu = PTHREAD_MUTEX_INITIALIZER;
+static int microphone_enabled = 1;
+
+void hv_audio_set_microphone_enabled(int enabled) {
+    microphone_enabled = enabled != 0;
+}
 
 /* ---- HDA Playback (Output AudioUnit) ---- */
 static AudioComponentInstance hda_out_unit;
@@ -131,6 +136,7 @@ static void dispose_in_locked(void) {
 }
 
 static int hda_start_in(void *opaque, unsigned channels, unsigned rate_hz) {
+    if (!microphone_enabled) return -1;
     HvHda *hda = (HvHda *)opaque;
     if (channels < 1 || channels > 2) channels = 2;
     if (rate_hz < 8000 || rate_hz > 192000) rate_hz = 48000;

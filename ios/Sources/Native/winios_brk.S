@@ -17,6 +17,8 @@
 .p2align 2
 _winios_brk_get_jit_mapping:
     mov     x16, #1              /* CMD_PREPARE_REGION */
+.globl _winios_brk_mapping_trap
+_winios_brk_mapping_trap:
     brk     #0xf00d
     ret
 
@@ -24,12 +26,16 @@ _winios_brk_get_jit_mapping:
 .p2align 2
 _winios_brk_jit_detach:
     mov     x16, #0              /* CMD_DETACH */
+.globl _winios_brk_detach_trap
+_winios_brk_detach_trap:
     brk     #0xf00d
     ret
 
 .globl _winios_brk_probe
 .p2align 2
 _winios_brk_probe:
+.globl _winios_brk_probe_trap
+_winios_brk_probe_trap:
     brk     #0x69
     ret
 

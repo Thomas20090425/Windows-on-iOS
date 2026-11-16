@@ -46,6 +46,8 @@ enum { CC_SUCCESS = 1, CC_TRB_ERROR = 5, CC_STALL = 6, CC_SLOTS_FULL = 9, CC_SHO
 #define SPEED_FULL 1
 
 #define HID_DCI_IN 3 /* endpoint 1 IN */
+#define STORAGE_DCI_OUT 2 /* endpoint 1 OUT */
+#define STORAGE_DCI_IN 3  /* endpoint 1 IN, on Port 3 only */
 
 /* ---- Port 1: USB HID 1.11 Boot Keyboard ---- */
 
@@ -70,11 +72,12 @@ static const uint8_t kbd_config_desc[34] = {
 };
 
 /* ---- Port 2: USB HID Absolute Tablet (QEMU USB Tablet 0627:0001 style) ----
-   6-byte report:
+   7-byte report:
      byte 0: buttons (bit 0 = Left, bit 1 = Right, bit 2 = Middle)
      byte 1..2: X (0..32767, absolute)
      byte 3..4: Y (0..32767, absolute)
      byte 5: Wheel (-127..127, relative)
+     byte 6: Consumer AC Pan (-127..127, relative)
 */
 static const uint8_t tab_report_desc[] = {
     0x05, 0x01,             /* Usage Page (Generic Desktop) */
@@ -107,6 +110,9 @@ static const uint8_t tab_report_desc[] = {
     0x75, 0x08,             /*     Report Size (8) */
     0x95, 0x01,             /*     Report Count (1) */
     0x81, 0x06,             /*     Input (Data,Var,Rel) */
+    0x05, 0x0c,             /*     Usage Page (Consumer) */
+    0x0a, 0x38, 0x02,       /*     Usage (AC Pan) */
+    0x81, 0x06,             /*     Input (Data,Var,Rel), same signed 8-bit range */
     0xc0,                   /*   End Collection */
     0xc0,                   /* End Collection */
 };
@@ -124,6 +130,20 @@ static const uint8_t tab_config_desc[34] = {
     7, 5, 0x81, 3, 8, 0, 1,                                       /* EP1 IN, 8 bytes max, 1 ms */
 };
 
+/* USB 2.0 high-speed, SCSI transparent Bulk-Only Transport. LUN0 is a
+ * DVD-ROM; optional LUN1 contains guarded setup answers, and LUN2 contains
+ * bundled Windows drivers. The removable media are immutable. */
+static const uint8_t storage_device_desc[18] = {
+    18, 1, 0x00, 0x02, 0, 0, 0, 64,
+    0x27, 0x06, 0x03, 0x00, 0x00, 0x01, 1, 6, 7, 1,
+};
+static const uint8_t storage_config_desc[32] = {
+    9, 2, 32, 0, 1, 1, 0, 0x80, 50,
+    9, 4, 0, 0, 2, 8, 6, 0x50, 0,
+    7, 5, 0x01, 2, 0, 2, 0,
+    7, 5, 0x81, 2, 0, 2, 0,
+};
+
 static const char *const strings[] = {
     NULL,
     "WindowsiOS",
@@ -131,6 +151,8 @@ static const char *const strings[] = {
     "KBD01",
     "WindowsiOS USB Tablet",
     "TAB01",
+    "WindowsiOS Media and Drivers",
+    "SETUP01",
 };
 
 static int xlog(void) {
@@ -266,6 +288,7 @@ static void set_ep_state(HvXhci *x, int slot, int dci, uint32_t state) {
 
 static int control(HvXhci *x, HvXhciSlot *sl, const uint8_t setup[8], uint8_t *out, int max) {
     int is_tab = sl->port == 2;
+    int is_storage = sl->port == 3;
     uint8_t type = setup[0], req = setup[1];
     uint16_t value = (uint16_t)(setup[2] | setup[3] << 8);
     if (xlog()) fprintf(stderr, "xhci port %d: request %02x %02x value %04x len %u\n", sl->port, type, req, value, setup[6] | setup[7] << 8);
@@ -274,15 +297,23 @@ static int control(HvXhci *x, HvXhciSlot *sl, const uint8_t setup[8], uint8_t *o
     int len = 0;
     uint8_t tmp[128];
 
-    const uint8_t *dev_d = is_tab ? tab_device_desc : kbd_device_desc;
-    const uint8_t *cfg_d = is_tab ? tab_config_desc : kbd_config_desc;
+    const uint8_t *dev_d = is_storage ? storage_device_desc : is_tab ? tab_device_desc : kbd_device_desc;
+    const uint8_t *cfg_d = is_storage ? storage_config_desc : is_tab ? tab_config_desc : kbd_config_desc;
     const uint8_t *rep_d = is_tab ? tab_report_desc : kbd_report_desc;
     int rep_d_len = is_tab ? (int)sizeof(tab_report_desc) : (int)sizeof(kbd_report_desc);
 
     if (type == 0x80 && req == 6) { /* GET_DESCRIPTOR (device) */
         uint8_t dt = value >> 8, idx = value & 0xff;
         if (dt == 1) src = dev_d, len = 18;
-        else if (dt == 2) src = cfg_d, len = 34;
+        else if (dt == 2) src = cfg_d, len = is_storage ? (int)sizeof storage_config_desc : 34;
+        else if (is_storage && dt == 6) {
+            const uint8_t qualifier[10] = {10, 6, 0, 2, 0, 0, 0, 64, 1, 0};
+            memcpy(tmp, qualifier, sizeof qualifier); src = tmp, len = sizeof qualifier;
+        } else if (is_storage && dt == 7) {
+            memcpy(tmp, storage_config_desc, sizeof storage_config_desc);
+            tmp[1] = 7; tmp[22] = tmp[29] = 64; tmp[23] = tmp[30] = 0;
+            src = tmp, len = sizeof storage_config_desc;
+        }
         else if (dt == 3) {
             if (idx == 0) {
                 tmp[0] = 4, tmp[1] = 3, tmp[2] = 0x09, tmp[3] = 0x04;
@@ -295,7 +326,13 @@ static int control(HvXhci *x, HvXhciSlot *sl, const uint8_t setup[8], uint8_t *o
                 src = tmp, len = 2 + 2 * n;
             } else return -1;
         } else return -1;
-    } else if (type == 0x81 && req == 6) { /* GET_DESCRIPTOR (interface): HID, report */
+    } else if (is_storage && type == 0xa1 && req == 0xfe) { /* GET_MAX_LUN */
+        tmp[0] = hv_usb_storage_max_lun(&x->storage);
+        src = tmp, len = 1;
+    } else if (is_storage && type == 0x21 && req == 0xff) { /* BULK_ONLY_RESET */
+        hv_usb_storage_reset(&x->storage);
+        return 0;
+    } else if (type == 0x81 && req == 6 && !is_storage) { /* GET_DESCRIPTOR (interface): HID, report */
         if ((value >> 8) == 0x22) src = rep_d, len = rep_d_len;
         else if ((value >> 8) == 0x21) src = cfg_d + 18, len = 9;
         else return -1;
@@ -311,19 +348,19 @@ static int control(HvXhci *x, HvXhciSlot *sl, const uint8_t setup[8], uint8_t *o
     } else if (type == 0x81 && req == 10) { /* GET_INTERFACE */
         tmp[0] = 0;
         src = tmp, len = 1;
-    } else if (type == 0xa1 && req == 1) { /* GET_REPORT */
-        if (is_tab) src = x->tab_state, len = 6;
+    } else if (!is_storage && type == 0xa1 && req == 1) { /* GET_REPORT */
+        if (is_tab) src = x->tab_state, len = sizeof x->tab_state;
         else src = x->state, len = 8;
-    } else if (type == 0xa1 && req == 2) { /* GET_IDLE */
+    } else if (!is_storage && type == 0xa1 && req == 2) { /* GET_IDLE */
         tmp[0] = sl->idle;
         src = tmp, len = 1;
-    } else if (type == 0xa1 && req == 3) { /* GET_PROTOCOL */
+    } else if (!is_storage && type == 0xa1 && req == 3) { /* GET_PROTOCOL */
         tmp[0] = sl->protocol;
         src = tmp, len = 1;
-    } else if (type == 0x21 && req == 0x0a) { /* SET_IDLE */
+    } else if (!is_storage && type == 0x21 && req == 0x0a) { /* SET_IDLE */
         sl->idle = (uint8_t)(value >> 8);
         return 0;
-    } else if (type == 0x21 && req == 0x0b) { /* SET_PROTOCOL */
+    } else if (!is_storage && type == 0x21 && req == 0x0b) { /* SET_PROTOCOL */
         sl->protocol = (uint8_t)(value & 1);
         return 0;
     } else if ((type & 0x60) == 0x20 || (type == 0x00 && (req == 1 || req == 3)) ||
@@ -471,6 +508,76 @@ static int deliver_hid_in(HvXhci *x, int slot, const uint8_t *report, uint32_t r
     return 0;
 }
 
+/* Bulk endpoint TDs may span multiple Normal TRBs and finish with Event Data.
+ * Read one BOT phase per TD so a short SCSI payload cannot consume the CSW.
+ * ISO reads stream through a bounded scratch buffer rather than allocating a
+ * guest-controlled transfer size or loading the installation ISO into RAM. */
+static void run_storage_ep(HvXhci *x, int slot, int dci) {
+    HvXhciSlot *sl = &x->slots[slot];
+    HvXhciRing *ring = &sl->ep[dci];
+    int in = dci == STORAGE_DCI_IN;
+    uint8_t scratch[65536];
+    uint32_t trb[4];
+    uint64_t at;
+    for (int guard = 0; guard < 4096 && ring_peek(x, ring, trb, &at); guard++) {
+        int type = (trb[3] >> 10) & 0x3f;
+        int ioc = (trb[3] >> 5) & 1, ch = (trb[3] >> 4) & 1, isp = (trb[3] >> 2) & 1;
+        if (type == TRB_EVENT_DATA) {
+            ring_advance(ring);
+            if (ioc) transfer_event_ed(x, (int)(trb[2] >> 22), (uint64_t)trb[1] << 32 | trb[0],
+                sl->storage_td_short[in] ? CC_SHORT_PACKET : CC_SUCCESS, sl->storage_td_bytes[in], slot, dci);
+            sl->storage_td_bytes[in] = sl->storage_td_open[in] = sl->storage_td_short[in] = sl->storage_td_done[in] = 0;
+            continue;
+        }
+        if (type != TRB_NORMAL) {
+            ring_advance(ring);
+            if (ioc) transfer_event(x, at, type == TRB_NOOP ? CC_SUCCESS : CC_TRB_ERROR, 0, slot, dci);
+            continue;
+        }
+        if (in && !sl->storage_td_done[in] &&
+            (x->storage.phase == HV_USB_STORAGE_CBW || x->storage.phase == HV_USB_STORAGE_DATA_OUT)) return;
+        uint64_t buffer = (uint64_t)trb[1] << 32 | trb[0];
+        uint32_t want = trb[2] & 0x1ffff, done = 0;
+        int failed = 0;
+        sl->storage_td_open[in] = 1;
+        if (!sl->storage_td_done[in]) {
+            while (done < want) {
+                uint32_t chunk = want - done;
+                if (chunk > sizeof scratch) chunk = sizeof scratch;
+                if (in) {
+                    uint8_t phase = x->storage.phase;
+                    int got = hv_usb_storage_read(&x->storage, scratch, chunk);
+                    if (got == -2 && done == 0) return;
+                    if (got < 0) { failed = 1; break; }
+                    if (got) wr(x, buffer + done, scratch, (unsigned)got);
+                    done += (uint32_t)got;
+                    if (x->storage.phase != phase) { sl->storage_td_done[in] = 1; break; }
+                    if ((uint32_t)got < chunk) break;
+                } else {
+                    if ((trb[3] & (1u << 6)) != 0) { /* Immediate Data, at most 8 bytes. */
+                        if (want > 8) { failed = 1; break; }
+                        memcpy(scratch, trb, want);
+                    } else rd(x, buffer + done, scratch, chunk);
+                    if (hv_usb_storage_write(&x->storage, scratch, chunk) != 0) { failed = 1; break; }
+                    done += chunk;
+                }
+            }
+        }
+        ring_advance(ring);
+        if (failed) {
+            transfer_event(x, at, CC_STALL, want - done, slot, dci);
+            set_ep_state(x, slot, dci, 2);
+            sl->ep_running[dci] = 0;
+            return;
+        }
+        sl->storage_td_bytes[in] += done;
+        if (done < want) sl->storage_td_short[in] = sl->storage_td_done[in] = 1;
+        if (ioc || (isp && done < want))
+            transfer_event(x, at, done < want ? CC_SHORT_PACKET : CC_SUCCESS, want - done, slot, dci);
+        if (!ch) sl->storage_td_bytes[in] = sl->storage_td_open[in] = sl->storage_td_short[in] = sl->storage_td_done[in] = 0;
+    }
+}
+
 static void run_ep_in(HvXhci *x) {
     pthread_mutex_lock(&x->mu);
     /* Port 1: Keyboard */
@@ -490,7 +597,7 @@ static void run_ep_in(HvXhci *x) {
         int slot = x->tab_slot;
         while (x->thead != x->ttail) {
             const uint8_t *rep = x->tab_reports[x->thead % HV_XHCI_REPORTS];
-            if (!deliver_hid_in(x, slot, rep, 6)) break;
+            if (!deliver_hid_in(x, slot, rep, sizeof x->tab_state)) break;
             x->thead++;
             x->delivered++;
             if (xlog() && x->delivered <= 24)
@@ -519,6 +626,7 @@ static int address_device(HvXhci *x, int slot, uint64_t input, int bsr) {
     rd(x, input + 64, ep0, 32);
     int port = slot_ctx[6]; /* root hub port number (1 or 2) */
     if (port < 1 || port > HV_XHCI_PORTS) return CC_TRB_ERROR;
+    if (port == 3 && !hv_usb_storage_has_media(&x->storage)) return CC_TRB_ERROR;
 
     uint32_t dw3 = (uint32_t)(bsr ? 1 : 2) << 27 | (uint32_t)(bsr ? 0 : slot);
     memcpy(slot_ctx + 12, &dw3, 4);
@@ -534,6 +642,7 @@ static int address_device(HvXhci *x, int slot, uint64_t input, int bsr) {
     x->slots[slot].idle = 0;
     if (port == 1) x->kbd_slot = slot;
     else if (port == 2) x->tab_slot = slot;
+    else if (port == 3) x->storage_slot = slot;
     init_ring_from_ctx(x, slot, 1);
     return CC_SUCCESS;
 }
@@ -603,6 +712,7 @@ static void run_commands(HvXhci *x) {
             if (slot >= 1 && slot <= HV_XHCI_SLOTS) {
                 if (slot == x->kbd_slot) x->kbd_slot = 0;
                 if (slot == x->tab_slot) x->tab_slot = 0;
+                if (slot == x->storage_slot) x->storage_slot = 0;
                 memset(&x->slots[slot], 0, sizeof x->slots[slot]);
             }
             break;
@@ -686,7 +796,9 @@ static void run_commands(HvXhci *x) {
 
 static void ports_connect_init(HvXhci *x) {
     for (int p = 0; p < HV_XHCI_PORTS; p++) {
-        x->portsc[p] = PORT_PP | PORT_CCS | PORT_CSC | ((uint32_t)SPEED_FULL << PORT_SPEED_SHIFT) | (7u << PORT_PLS_SHIFT);
+        int connected = p < 2 || hv_usb_storage_has_media(&x->storage);
+        x->portsc[p] = PORT_PP | (connected ? PORT_CCS | PORT_CSC : 0) |
+            ((uint32_t)(p == 2 ? SPEED_HIGH : SPEED_FULL) << PORT_SPEED_SHIFT) | (7u << PORT_PLS_SHIFT);
     }
 }
 
@@ -727,6 +839,8 @@ static void reset(HvXhci *x) {
     memset(x->slots, 0, sizeof x->slots);
     x->kbd_slot = 0;
     x->tab_slot = 0;
+    x->storage_slot = 0;
+    hv_usb_storage_reset(&x->storage);
     ports_connect_init(x);
     update_irq(x);
 }
@@ -889,7 +1003,10 @@ static void bar_write(HvPciDev *d, int bar, uint64_t off, uint64_t v, unsigned s
             if (state != 1) set_ep_state(x, slot, dci, 1);
             x->slots[slot].ep_running[dci] = 1;
             if (dci == 1) run_ep0(x, slot);
-            else if (dci == HID_DCI_IN) run_ep_in(x);
+            else if (x->slots[slot].port == 3 && (dci == STORAGE_DCI_IN || dci == STORAGE_DCI_OUT)) {
+                run_storage_ep(x, slot, dci);
+                if (dci == STORAGE_DCI_OUT && x->slots[slot].ep_running[STORAGE_DCI_IN]) run_storage_ep(x, slot, STORAGE_DCI_IN);
+            } else if (dci == HID_DCI_IN) run_ep_in(x);
         }
     }
 }
@@ -912,13 +1029,20 @@ void hv_xhci_key(HvXhci *x, uint8_t usage, int down) {
             s[7] = 0;
         }
     }
-    if (x->rtail - x->rhead < HV_XHCI_REPORTS)
-        memcpy(x->reports[x->rtail++ % HV_XHCI_REPORTS], s, 8);
+    /* Keep the latest complete key state even under an input burst. In particular,
+       never drop a release and leave a modifier held indefinitely. */
+    if (x->rtail - x->rhead >= HV_XHCI_REPORTS) x->rhead++;
+    memcpy(x->reports[x->rtail++ % HV_XHCI_REPORTS], s, 8);
     pthread_mutex_unlock(&x->mu);
     hv_machine_wake(x->m);
 }
 
 void hv_xhci_tablet(HvXhci *x, int abs_x, int abs_y, uint8_t buttons, int8_t wheel) {
+    hv_xhci_tablet_scroll(x, abs_x, abs_y, buttons, wheel, 0);
+}
+
+void hv_xhci_tablet_scroll(HvXhci *x, int abs_x, int abs_y, uint8_t buttons,
+                          int8_t wheel, int8_t horizontal_wheel) {
     if (!x) return;
     if (abs_x < 0) abs_x = 0;
     if (abs_x > 32767) abs_x = 32767;
@@ -926,27 +1050,29 @@ void hv_xhci_tablet(HvXhci *x, int abs_x, int abs_y, uint8_t buttons, int8_t whe
     if (abs_y > 32767) abs_y = 32767;
 
     pthread_mutex_lock(&x->mu);
-    uint8_t rep[6];
+    uint8_t rep[7];
     rep[0] = buttons & 0x07;
     rep[1] = (uint8_t)(abs_x & 0xff);
     rep[2] = (uint8_t)((abs_x >> 8) & 0xff);
     rep[3] = (uint8_t)(abs_y & 0xff);
     rep[4] = (uint8_t)((abs_y >> 8) & 0xff);
     rep[5] = (uint8_t)wheel;
-    memcpy(x->tab_state, rep, 6);
+    rep[6] = (uint8_t)horizontal_wheel;
+    memcpy(x->tab_state, rep, sizeof rep);
+    x->tab_state[5] = x->tab_state[6] = 0; /* relative axes are impulses */
 
     /* Coalesce pure motion updates if queue has unconsumed entries and buttons/wheel match */
-    if (!wheel && x->ttail > x->thead) {
+    if (!wheel && !horizontal_wheel && x->ttail > x->thead) {
         uint8_t *prev = x->tab_reports[(x->ttail - 1) % HV_XHCI_REPORTS];
-        if (prev[0] == rep[0] && prev[5] == 0) {
-            memcpy(prev, rep, 6);
+        if (prev[0] == rep[0] && prev[5] == 0 && prev[6] == 0) {
+            memcpy(prev, rep, sizeof rep);
             pthread_mutex_unlock(&x->mu);
             hv_machine_wake(x->m);
             return;
         }
     }
-    if (x->ttail - x->thead < HV_XHCI_REPORTS)
-        memcpy(x->tab_reports[x->ttail++ % HV_XHCI_REPORTS], rep, 6);
+    if (x->ttail - x->thead >= HV_XHCI_REPORTS) x->thead++;
+    memcpy(x->tab_reports[x->ttail++ % HV_XHCI_REPORTS], rep, sizeof rep);
     pthread_mutex_unlock(&x->mu);
     hv_machine_wake(x->m);
 }
@@ -975,8 +1101,32 @@ void hv_xhci_key_linux(HvXhci *x, uint16_t code, int down) {
 }
 
 void hv_xhci_poll(HvXhci *x) {
-    if (!x || (x->rhead == x->rtail && x->thead == x->ttail)) return;
-    run_ep_in(x);
+    if (!x) return;
+    if (x->rhead != x->rtail || x->thead != x->ttail) run_ep_in(x);
+    int slot = x->storage_slot;
+    if (slot && x->slots[slot].ep_running[STORAGE_DCI_IN]) run_storage_ep(x, slot, STORAGE_DCI_IN);
+}
+
+void hv_xhci_attach_installer(HvXhci *x, HvDisk *iso, HvDisk *answer) {
+    if (!x) return;
+    HvDisk *drivers = x->storage.media[2];
+    hv_usb_storage_init(&x->storage, iso, answer);
+    x->storage.media[2] = drivers;
+    ports_connect_init(x);
+}
+
+void hv_xhci_attach_driver_disk(HvXhci *x, HvDisk *drivers) {
+    if (!x) return;
+    x->storage.media[2] = drivers;
+    x->storage.sense_key[2] = x->storage.sense_asc[2] = x->storage.sense_ascq[2] = 0;
+    hv_usb_storage_reset(&x->storage);
+    ports_connect_init(x);
+}
+
+void hv_xhci_remove_installer_answer(HvXhci *x) {
+    if (!x) return;
+    x->storage.media[1] = NULL;
+    hv_usb_storage_reset(&x->storage);
 }
 
 HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus) {

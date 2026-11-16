@@ -6,8 +6,9 @@
 #include "fw_cfg.h"
 
 /* Populate HvFwCfg with ACPI 6.4 tables (DSDT, FACP, APIC/MADT with GICv3 + GICv2m,
- * PPTT, GTDT, MCFG, SPCR, DBG2, IORT, XSDT), RSDP, BIOS table-loader script, and
- * SMBIOS 3.0 tables for EDK2 ArmVirtQemu and Windows 11 ARM64. */
-void hv_acpi_build_and_register(HvFwCfg *fw, int ncpus, uint64_t ram_size, int spi_msi_base, int spi_msi_count);
+ * PPTT, GTDT, MCFG, SPCR, DBG2, IORT, optional TPM2, XSDT), RSDP, BIOS
+ * table-loader script, and SMBIOS 3.0 tables for EDK2 ArmVirtQemu and Windows
+ * 11 ARM64. Advertise TPM2 only after the real backend has initialized. */
+void hv_acpi_build_and_register(HvFwCfg *fw, int ncpus, uint64_t ram_size, int spi_msi_base, int spi_msi_count, int tpm_present);
 
 #endif

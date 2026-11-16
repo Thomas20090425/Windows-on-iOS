@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "fdt.h"
+#include "cpu_model.h"
+#include "tpm_crb.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -111,7 +113,7 @@ static void fdt_prop_strlist(Buf *st, Buf *strs, const char *name, const char *c
 #define PHANDLE_V2M  0x8007U
 #define PHANDLE_CPU0 0x8100U
 
-uint8_t *hv_fdt_build_virt(int ncpus, uint64_t ram_base, uint64_t ram_size, size_t *out_size) {
+uint8_t *hv_fdt_build_virt(int ncpus, uint64_t ram_base, uint64_t ram_size, size_t *out_size, int tpm_present) {
     if (ncpus < 1 || ncpus > 64) return NULL;
 
     Buf st = {0}, strs = {0};
@@ -160,6 +162,25 @@ uint8_t *hv_fdt_build_virt(int ncpus, uint64_t ram_base, uint64_t ram_size, size
     }
     fdt_prop_str(&st, &strs, "compatible", "qemu,fw-cfg-mmio");
     fdt_end_node(&st);
+
+    if (tpm_present) {
+        /* EDK2 ArmVirt's PlatformPeiLib discovers a TPM through this genuine
+         * FIFO/TIS frontend. It initializes and measures into the same TPM
+         * backend that Windows subsequently accesses through ACPI CRB. Do not
+         * label the CRB frontend as TIS: their register protocols differ. */
+        char nodename[48];
+        snprintf(nodename, sizeof nodename, "tpm@%llx",
+                 (unsigned long long)HV_TPM_TIS_BASE);
+        fdt_begin_node(&st, nodename);
+        uint32_t reg[4] = {
+            (uint32_t)((uint64_t)HV_TPM_TIS_BASE >> 32), (uint32_t)HV_TPM_TIS_BASE,
+            (uint32_t)((uint64_t)HV_TPM_TIS_SIZE >> 32), (uint32_t)HV_TPM_TIS_SIZE,
+        };
+        fdt_prop_cells(&st, &strs, "reg", reg, 4);
+        fdt_prop_str(&st, &strs, "compatible", "tcg,tpm-tis-mmio");
+        fdt_prop_str(&st, &strs, "status", "okay");
+        fdt_end_node(&st);
+    }
 
     /* /gpio-keys & /pl061@9030000 */
     fdt_begin_node(&st, "gpio-keys");
@@ -342,7 +363,7 @@ uint8_t *hv_fdt_build_virt(int ncpus, uint64_t ram_base, uint64_t ram_size, size
         fdt_prop_u32(&st, &strs, "phandle", PHANDLE_CPU0 + (uint32_t)i);
         fdt_prop_u32(&st, &strs, "reg", (uint32_t)i);
         fdt_prop_str(&st, &strs, "enable-method", "psci");
-        fdt_prop_str(&st, &strs, "compatible", "arm,cortex-a76");
+        fdt_prop_str(&st, &strs, "compatible", HV_CPU_FDT_COMPATIBLE);
         fdt_prop_str(&st, &strs, "device_type", "cpu");
         fdt_end_node(&st);
     }

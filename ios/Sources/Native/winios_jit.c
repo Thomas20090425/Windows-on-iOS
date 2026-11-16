@@ -4,6 +4,7 @@
  * Adapted from Henge (Leviidev/Henge, GPL-2.0-or-later).
  */
 #include "winios_jit.h"
+#include "guest_memory.h"
 #include "winvirt.h"
 
 #include <TargetConditionals.h>
@@ -60,6 +61,20 @@ int pipe2(int fds[2], int flags) {
 extern void    *winios_brk_get_jit_mapping(void *addr, size_t len);
 extern void     winios_brk_jit_detach(void);
 extern uint64_t winios_brk_probe(void);
+extern const uint8_t winios_brk_probe_trap[];
+extern const uint8_t winios_brk_mapping_trap[];
+extern const uint8_t winios_brk_detach_trap[];
+
+/* Helpers write this process-local word only after attaching and before
+ * resuming. CS_DEBUGGED alone also covers ordinary Xcode Run and can remain
+ * set after detach, so it cannot authorize the custom BRK protocol. */
+__attribute__((used, visibility("default"), aligned(8)))
+_Atomic uint64_t winios_jit_helper_token;
+#define WINIOS_JIT_HELPER_READY UINT64_C(0x574A4954)
+
+uint64_t winios_jit_helper_token_address(void) {
+    return (uint64_t)(uintptr_t)&winios_jit_helper_token;
+}
 
 #define WINIOS_LOG(fmt, ...)                                              \
     do {                                                                  \
@@ -77,13 +92,14 @@ __attribute__((used, aligned(16384)))
 static uint8_t g_jit_reserve[WINIOS_JIT_DEFAULT_BYTES + (16u << 10)];
 static bool g_jit_reserve_released;
 
-static _Thread_local bool g_expecting_jit_trap;
+static _Thread_local uintptr_t g_expected_jit_trap_pc;
 static struct sigaction g_prev_sigtrap;
-static struct sigaction g_prev_sigbus;
+static bool g_trap_handler_installed;
 
 static WinIosDualMapping g_mapping;
 static void *g_guest_ram;
 static uint64_t g_guest_ram_bytes;
+static uint64_t g_requested_guest_mb = 4096;
 static atomic_bool g_jit_live;
 static char g_status[256] = "Not initialized";
 
@@ -92,12 +108,10 @@ static void prealloc_ledger_exempt_ram(void) {
     uint64_t phys_mem = 0;
     size_t len = sizeof phys_mem;
     sysctlbyname("hw.memsize", &phys_mem, &len, NULL, 0);
-    uint64_t phys_mb = phys_mem >> 20;
-    /* Size Guest RAM to fit comfortably within iOS 36-bit user VA ceiling alongside TXM JIT RX/RW + JIT tables */
-    static const uint64_t candidates_mb[] = {4608, 4096, 3584, 3072, 2560, 2048};
-    for (size_t i = 0; i < sizeof(candidates_mb) / sizeof(candidates_mb[0]); i++) {
-        uint64_t mb = candidates_mb[i];
-        if (phys_mb > 0 && mb + 2560 > phys_mb) continue;
+    /* Reserve the configured Windows 11 minimum or larger, without silently
+     * shrinking the guest or assuming the memory ledger exception will work. */
+    uint64_t mb = g_requested_guest_mb;
+    if (mb >= HV_GUEST_MIN_MEMORY_MB && mb <= hv_guest_memory_limit_mb(phys_mem)) {
         uint8_t *p = hv_alloc_no_footprint(mb << 20);
         if (p) {
             g_guest_ram = p;
@@ -110,6 +124,11 @@ static void prealloc_ledger_exempt_ram(void) {
     WINIOS_LOG("ledger-exempt Guest RAM pre-allocation unavailable; will fall back at VM start");
 }
 
+void winios_jit_set_guest_memory_mb(uint64_t memory_mb) {
+    if (memory_mb >= HV_GUEST_MIN_MEMORY_MB && memory_mb <= HV_GUEST_MAP_MAX_MEMORY_MB)
+        g_requested_guest_mb = memory_mb;
+}
+
 static void set_status(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void set_status(const char *fmt, ...) {
     va_list ap;
@@ -120,25 +139,32 @@ static void set_status(const char *fmt, ...) {
 
 static void winios_trap_handler(int sig, siginfo_t *info, void *ctx) {
     (void)info;
-    if (g_expecting_jit_trap && ctx != NULL) {
+    if (sig == SIGTRAP && g_expected_jit_trap_pc && ctx != NULL) {
         ucontext_t *uc = (ucontext_t *)ctx;
-        uc->uc_mcontext->__ss.__pc += 4;
-        uc->uc_mcontext->__ss.__x[0] = 0;
-        return;
+        uintptr_t pc = (uintptr_t)uc->uc_mcontext->__ss.__pc;
+        if (pc == g_expected_jit_trap_pc) {
+            uint32_t opcode = *(const uint32_t *)pc;
+            uint32_t expected = 0xd4200000u | ((pc == (uintptr_t)winios_brk_probe_trap ? 0x69u : 0xf00du) << 5);
+            if (opcode == expected) {
+                uc->uc_mcontext->__ss.__pc += 4;
+                uc->uc_mcontext->__ss.__x[0] = 0;
+                return;
+            }
+        }
     }
-    struct sigaction *prev = (sig == SIGTRAP) ? &g_prev_sigtrap : &g_prev_sigbus;
-    sigaction(sig, prev, NULL);
+    sigaction(sig, &g_prev_sigtrap, NULL);
     raise(sig);
 }
 
 void winios_jit_install_trap_handler(void) {
+    if (g_trap_handler_installed) return;
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sa.sa_sigaction = winios_trap_handler;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGTRAP, &sa, &g_prev_sigtrap);
-    sigaction(SIGBUS, &sa, &g_prev_sigbus);
+    g_trap_handler_installed = true;
     set_status("Trap guard ready");
     WINIOS_LOG("trap guard installed");
 }
@@ -204,14 +230,21 @@ bool winios_jit_acquire(size_t bytes, bool detach_after) {
     bytes = (bytes + 0x3fffu) & ~(size_t)0x3fffu;
 
     if (!winios_jit_is_debugger_attached()) {
+        atomic_store(&winios_jit_helper_token, 0);
         set_status("Waiting for debugger (StikDebug or LLDB)");
         WINIOS_LOG("acquire: CS_DEBUGGED not set yet");
         return false;
     }
 
-    g_expecting_jit_trap = true;
+    if (atomic_load_explicit(&winios_jit_helper_token, memory_order_acquire) != WINIOS_JIT_HELPER_READY) {
+        set_status("JIT helper required: Xcode Run alone cannot service JIT. Use launch_on_device.sh or Enable JIT.");
+        WINIOS_LOG("acquire: debugger present without the JIT helper handshake; no BRK emitted");
+        return false;
+    }
+
+    g_expected_jit_trap_pc = (uintptr_t)winios_brk_probe_trap;
     uint64_t probe = winios_brk_probe();
-    g_expecting_jit_trap = false;
+    g_expected_jit_trap_pc = 0;
 
     if (probe == 0) {
         /* Pre-iOS 26 fallback where CS_DEBUGGED permits plain vm_remap RX/RW without trap servicing */
@@ -243,14 +276,20 @@ bool winios_jit_acquire(size_t bytes, bool detach_after) {
         return false;
     }
 
+    if (probe != UINT64_C(0xE0000069)) {
+        atomic_store(&winios_jit_helper_token, 0);
+        set_status("JIT helper returned an invalid protocol response; relaunch using the supplied helper.");
+        return false;
+    }
+
     WINIOS_LOG("probe answered: 0x%llx", (unsigned long long)probe);
     release_low_hold(bytes);
 
     void *rx = NULL;
     for (int attempt = 1; attempt <= 3; attempt++) {
-        g_expecting_jit_trap = true;
+        g_expected_jit_trap_pc = (uintptr_t)winios_brk_mapping_trap;
         rx = winios_brk_get_jit_mapping(NULL, bytes);
-        g_expecting_jit_trap = false;
+        g_expected_jit_trap_pc = 0;
         if (rx != NULL) break;
         usleep(50 * 1000);
     }
@@ -310,14 +349,15 @@ bool winios_jit_acquire(size_t bytes, bool detach_after) {
     g_mapping = m;
     prealloc_ledger_exempt_ram();
     atomic_store(&g_jit_live, true);
+    atomic_store(&winios_jit_helper_token, 0);
 
     if (detach_after) {
         WINIOS_LOG("detaching debugger; %zu MiB RX=%p RW=%p, GuestRAM=%llu MiB stays live",
                    bytes >> 20, (void *)m.rx_addr, (void *)m.rw_addr,
                    (unsigned long long)(g_guest_ram_bytes >> 20));
-        g_expecting_jit_trap = true;
+        g_expected_jit_trap_pc = (uintptr_t)winios_brk_detach_trap;
         winios_brk_jit_detach();
-        g_expecting_jit_trap = false;
+        g_expected_jit_trap_pc = 0;
     }
 
     set_status("Live (%zu MiB TXM JIT, %llu MiB RAM)", bytes >> 20,

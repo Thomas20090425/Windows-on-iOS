@@ -39,11 +39,13 @@ typedef struct HvVirtio {
     uint32_t dfsel, gfsel;
     uint8_t status, isr, config_gen;
     uint16_t qsel, nq;
+    uint16_t config_vector, queue_vector[HV_VIRTQ_MAX];
     HvVirtq q[HV_VIRTQ_MAX];
     uint8_t config[256];
     uint32_t config_len;
     void (*notify)(struct HvVirtio *v, int q);
     void (*config_write)(struct HvVirtio *v, uint32_t off, uint64_t val, unsigned size);
+    void (*reset)(struct HvVirtio *v); /* Optional device-specific state reset. */
     void *dev;
 } HvVirtio;
 
@@ -55,6 +57,11 @@ void hv_virtio_init(HvVirtio *v, HvMachine *m, int device_id, uint32_t class_cod
 int hv_virtq_pop(HvVirtio *v, int q, HvVirtqElem *e);
 void hv_virtq_push(HvVirtio *v, int q, const HvVirtqElem *e, uint32_t written);
 void hv_virtio_interrupt(HvVirtio *v);
+/* Optional modern MSI-X transport; existing devices retain INTx by default. */
+void hv_virtio_enable_msix(HvVirtio *v, uint16_t vectors);
+void hv_virtio_reset(HvVirtio *v);
+void hv_virtio_queue_interrupt(HvVirtio *v, int q);
+void hv_virtio_config_interrupt(HvVirtio *v);
 
 /* Copy between an element's buffers and host memory, skipping `off` bytes of
    the readable (to) or writable (from) segments. Return bytes copied. */

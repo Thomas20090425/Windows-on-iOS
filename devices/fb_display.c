@@ -39,7 +39,8 @@ static void on_ramfb_write(void *opaque, const uint8_t *data, uint32_t len) {
 
     if (width < 64 || width > 8192 || height < 64 || height > 8192) return;
     if (stride == 0) stride = width * 4;
-    if (stride < width * 2 || stride > 65536) return;
+    if (stride < width * 4 || stride > 65536) return;
+    if (fourcc != 0x34325258u && fourcc != 0x34325241u) return; /* XR24 / AR24 */
 
     uint64_t total_bytes = (uint64_t)stride * (height - 1) + (uint64_t)width * 4;
     void *host_ptr = hv_phys_ptr(fb->m, addr, total_bytes);
@@ -50,6 +51,10 @@ static void on_ramfb_write(void *opaque, const uint8_t *data, uint32_t len) {
     }
 
     pthread_mutex_lock(&fb->mu);
+    if (fb->gpu_active) {
+        pthread_mutex_unlock(&fb->mu);
+        return;
+    }
     fb->fb_pa = addr;
     fb->fb_host = (const uint8_t *)host_ptr;
     fb->width = width;
@@ -65,6 +70,7 @@ static void on_ramfb_write(void *opaque, const uint8_t *data, uint32_t len) {
 
 HvFbDisplay *hv_fb_display_create(HvMachine *m, HvFwCfg *fw_cfg) {
     HvFbDisplay *fb = calloc(1, sizeof *fb);
+    if (!fb) return NULL;
     fb->m = m;
     pthread_mutex_init(&fb->mu, NULL);
     if (fw_cfg) {
@@ -73,7 +79,7 @@ HvFbDisplay *hv_fb_display_create(HvMachine *m, HvFwCfg *fw_cfg) {
     return fb;
 }
 
-int hv_fb_display_get_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_t *w, uint32_t *h, uint32_t *stride) {
+int hv_fb_display_lock_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_t *w, uint32_t *h, uint32_t *stride) {
     if (!fb) return -1;
     pthread_mutex_lock(&fb->mu);
     if (!fb->active || !fb->fb_host || !fb->width || !fb->height) {
@@ -84,6 +90,15 @@ int hv_fb_display_get_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_t *w
     *w = fb->width;
     *h = fb->height;
     *stride = fb->stride;
-    pthread_mutex_unlock(&fb->mu);
+    return 0;
+}
+
+void hv_fb_display_unlock_frame(HvFbDisplay *fb) {
+    if (fb) pthread_mutex_unlock(&fb->mu);
+}
+
+int hv_fb_display_get_frame(HvFbDisplay *fb, const uint8_t **pixels, uint32_t *w, uint32_t *h, uint32_t *stride) {
+    if (hv_fb_display_lock_frame(fb, pixels, w, h, stride)) return -1;
+    hv_fb_display_unlock_frame(fb);
     return 0;
 }

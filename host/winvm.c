@@ -4,6 +4,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <TargetConditionals.h>
 #include <os/lock.h>
+#include <math.h>
 #include <pthread.h>
 #include <pthread/qos.h>
 #include <signal.h>
@@ -19,6 +20,7 @@
 #include "dispatch.h"
 #include "net_slirp.h"
 #include "share.h"
+#include "guest_memory.h"
 
 static HvMachine m;
 static HvCpu cpus[HV_MAX_CPUS];
@@ -27,6 +29,9 @@ static int ncpus = 1;
 static HvWinVirt board;
 static HvDisk disk0 = {.fd = -1};
 static HvDisk disk1 = {.fd = -1};
+static HvDisk installer_iso = {.fd = -1};
+static HvDisk installer_answer = {.fd = -1};
+static HvDisk driver_disk = {.fd = -1};
 static int net_on;
 static int share_on;
 static _Atomic int stop_requested;
@@ -39,8 +44,12 @@ static _Atomic(HvFbDisplay *) display_fb;
 static void (*exit_cb)(int reason);
 
 int hv_winvm_share_up(void) { return share_on; }
+int hv_winvm_network_up(void) { return net_on; }
 HvMachine *hv_winvm_machine(void) { return &m; }
 HvWinVirt *hv_winvm_board(void) { return &board; }
+const char *hv_winvm_last_error(void) {
+    return board.tpm ? hv_tpm_crb_error(board.tpm) : NULL;
+}
 
 const char *hv_winvm_reason_name(int r) {
     switch (r) {
@@ -54,6 +63,13 @@ const char *hv_winvm_reason_name(int r) {
 
 static void board_poll(void) {
     if (net_on) hv_net_poll();
+    const char *tpm_error = hv_winvm_last_error();
+    if (tpm_error && *tpm_error && !atomic_exchange(&stop_requested, 1)) {
+        fprintf(stderr, "winvm: stopping after TPM failure: %s\n", tpm_error);
+        for (int i = 0; i < ncpus; i++) cpus[i].halted = 3;
+        hv_machine_kick_all(&m);
+        for (int i = 0; i < ncpus; i++) hv_cpu_wake(&cpus[i]);
+    }
 }
 
 static int fail(char *err, size_t n, const char *msg) {
@@ -137,6 +153,30 @@ uint64_t hv_winvm_display_frames(void) {
     return fb ? hv_fb_metal_frames(fb) : 0;
 }
 
+int hv_winvm_set_display_mode(uint32_t width, uint32_t height) {
+    if (!board.gpu) return -1;
+    hv_dev_lock(&m);
+    int result = hv_virtio_gpu_set_preferred(board.gpu, width, height);
+    hv_dev_unlock(&m);
+    return result;
+}
+
+int hv_winvm_graphics_active(void) {
+    if (!board.gpu) return 0;
+    hv_dev_lock(&m);
+    int ready = hv_virtio_gpu_driver_ready(board.gpu);
+    hv_dev_unlock(&m);
+    return ready;
+}
+
+int hv_winvm_network_driver_ready(void) {
+    if (!board.net || !net_on) return 0;
+    hv_dev_lock(&m);
+    int ready = (board.net->vio.status & 4) != 0;
+    hv_dev_unlock(&m);
+    return ready;
+}
+
 int hv_winvm_save_png(const char *path) {
     HvFbDisplay *fb = atomic_load_explicit(&display_fb, memory_order_acquire);
     return fb ? hv_fb_save_png(fb, path) : -1;
@@ -145,6 +185,8 @@ int hv_winvm_save_png(const char *path) {
 int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
     if (!c || !c->code_fd || !c->vars_fd)
         return fail(err, errlen, "UEFI firmware (code.fd) and NVRAM (vars.fd) are required.");
+    if (c->ram_mb > HV_GUEST_MAP_MAX_MEMORY_MB)
+        return fail(err, errlen, "Guest RAM exceeds the virtual machine's physical memory map.");
 
     atomic_store(&stop_requested, 0);
 
@@ -157,7 +199,7 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
 
     HvDisk *d0_ptr = NULL, *d1_ptr = NULL;
     if (c->disk0 && *c->disk0) {
-        if (hv_disk_open(&disk0, c->disk0, 0, 0) != 0)
+        if (hv_disk_open(&disk0, c->disk0, 0, c->disk0_readonly) != 0)
             return fail(err, errlen, "Cannot open primary NVMe disk image.");
         d0_ptr = &disk0;
     }
@@ -166,6 +208,19 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
             return fail(err, errlen, "Cannot open secondary/installer disk image.");
         d1_ptr = &disk1;
     }
+    if (c->installer_iso && *c->installer_iso) {
+        if (hv_disk_open(&installer_iso, c->installer_iso, 0, 1) != 0 ||
+            installer_iso.size < 32768 || (installer_iso.size % 2048) != 0)
+            return fail(err, errlen, "Cannot open the Windows installation ISO as a read-only optical image.");
+        if (c->installer_answer_disk && *c->installer_answer_disk &&
+            (hv_disk_open(&installer_answer, c->installer_answer_disk, 0, 1) != 0 ||
+             installer_answer.size < 512 || installer_answer.size % 512 != 0))
+            return fail(err, errlen, "Cannot open the app-created setup answer disk.");
+    }
+    if (c->driver_disk && *c->driver_disk &&
+        (hv_disk_open(&driver_disk, c->driver_disk, 0, 1) != 0 ||
+         driver_disk.size < 512 || driver_disk.size % 512 != 0))
+        return fail(err, errlen, "Cannot open the bundled Windows ARM64 driver disk.");
 
     size_t jit = c->jit_bytes ? c->jit_bytes : ((size_t)768 << 20);
     int r = c->jit_rx ? hv_machine_init_jit(&m, c->jit_rx, c->jit_rw, jit) : hv_machine_init(&m, jit);
@@ -185,10 +240,20 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
     uint64_t ram_bytes = (c->ram_mb ? c->ram_mb : 4096ULL) << 20;
     static const uint8_t mac[6] = {0x02, 0x57, 0x49, 0x4e, 0x00, 0x01};
     if (hv_winvirt_create(&board, &m, cpus, ncpus, ram_bytes, c->prealloc_ram, c->code_fd, c->vars_fd,
-                          d0_ptr, d1_ptr, mac, c->enable_sound) != 0) {
+                          d0_ptr, d1_ptr, mac, c->enable_sound, c->tpm_state_dir, err, errlen) != 0) {
+        if (err && errlen && *err) return -1;
         return fail(err, errlen, "Cannot create virtual ARM64 Windows board (insufficient RAM or missing firmware).");
     }
     hv_winvirt_reset_cpu(&board);
+    board.gpu = hv_virtio_gpu_create(&m, board.pcie, board.fb,
+        c->display_width ? c->display_width : 1920,
+        c->display_height ? c->display_height : 1080);
+    if (!board.gpu) return fail(err, errlen, "Cannot create the VirtIO 2D display device.");
+    if (installer_iso.fd >= 0 && board.usb)
+        hv_xhci_attach_installer(board.usb, &installer_iso, installer_answer.fd >= 0 ? &installer_answer : NULL);
+    if (driver_disk.fd >= 0 && board.usb) hv_xhci_attach_driver_disk(board.usb, &driver_disk);
+    if (board.fb) board.fb->presentation_hz = c->display_refresh_hz == 30 || c->display_refresh_hz == 120 ? c->display_refresh_hz : 60;
+    hv_audio_set_microphone_enabled(!c->disable_microphone);
 
     share_on = 0;
     if (c->share_dir && *c->share_dir && c->share_sock && *c->share_sock) {
@@ -198,7 +263,7 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
         }
     }
     if (board.net && !c->no_net) {
-        if (hv_net_attach(&m, board.net) == 0) net_on = 1;
+        if (hv_net_attach_with_forward(&m, board.net, c->tcp_forward_host_port, c->tcp_forward_guest_port) == 0) net_on = 1;
         else fprintf(stderr, "winvm: user-mode SLIRP networking unavailable\n");
     }
     if (board.hda && c->enable_sound) hv_audio_attach_hda(board.hda);
@@ -262,6 +327,7 @@ static void join_secondaries(void) {
 
 void hv_winvm_flush_disks(void) {
     if (disk0.fd >= 0) hv_disk_sync(&disk0);
+    if (board.tpm) (void)hv_tpm_crb_flush(board.tpm);
 }
 
 int hv_winvm_run_cpu0(void) {
@@ -273,6 +339,25 @@ int hv_winvm_run_cpu0(void) {
         if (cpus[0].halted == 2 && !atomic_load(&stop_requested)) {
             fprintf(stderr, "winvm: guest requested PSCI SYSTEM_RESET — rebooting...\n");
             join_secondaries();
+            /* Reset volatile TPM/locality state while retaining the same NV
+             * identity. Never continue a reboot with lost or unwritable keys. */
+            hv_dev_lock(&m);
+            int tpm_reset_failed = board.tpm && hv_tpm_crb_reset(board.tpm) != 0;
+            hv_dev_unlock(&m);
+            if (tpm_reset_failed) {
+                fprintf(stderr, "winvm: TPM reset failed: %s\n", hv_winvm_last_error());
+                atomic_store(&stop_requested, 1);
+                return HV_EXIT_HALT;
+            }
+            /* Unattended disk partitioning is authorized only for the fresh
+             * app-created target. Once any boot-sector data exists, remove
+             * the answer LUN before firmware re-enumeration on warm reset. */
+            if (board.usb && installer_answer.fd >= 0) {
+                uint8_t sector[512];
+                int changed = hv_disk_read(&disk0, 0, sector, sizeof sector) != 0;
+                if (!changed) for (size_t i = 0; i < sizeof sector; i++) if (sector[i]) { changed = 1; break; }
+                if (changed) hv_xhci_remove_installer_answer(board.usb);
+            }
             /* Reset GIC, ITS, PCIe, and pflash state for warm reboot */
             if (board.gic) {
                 pthread_mutex_lock(&board.gic->mu);
@@ -292,6 +377,9 @@ int hv_winvm_run_cpu0(void) {
                 pthread_mutex_unlock(&board.gic->mu);
             }
             hv_gicv3_its_reset(board.its);
+            hv_dev_lock(&m);
+            hv_virtio_gpu_reset(board.gpu);
+            hv_dev_unlock(&m);
             hv_pcie_reset(board.pcie);
             if (board.flash1) {
                 board.flash1->cmd = 0xff;
@@ -356,14 +444,19 @@ void hv_winvm_key_linux(uint16_t code, int down) {
 }
 
 void hv_winvm_tablet(double x_norm, double y_norm, uint8_t buttons, int8_t wheel) {
-    if (!board.usb) return;
+    hv_winvm_tablet_scroll(x_norm, y_norm, buttons, wheel, 0);
+}
+
+void hv_winvm_tablet_scroll(double x_norm, double y_norm, uint8_t buttons,
+                            int8_t wheel, int8_t horizontal_wheel) {
+    if (!board.usb || !isfinite(x_norm) || !isfinite(y_norm)) return;
     if (x_norm < 0.0) x_norm = 0.0;
     if (x_norm > 1.0) x_norm = 1.0;
     if (y_norm < 0.0) y_norm = 0.0;
     if (y_norm > 1.0) y_norm = 1.0;
     int ax = (int)(x_norm * 32767.0 + 0.5);
     int ay = (int)(y_norm * 32767.0 + 0.5);
-    hv_xhci_tablet(board.usb, ax, ay, buttons, wheel);
+    hv_xhci_tablet_scroll(board.usb, ax, ay, buttons, wheel, horizontal_wheel);
 }
 
 void hv_winvm_send_ctrl_alt_del(void) {

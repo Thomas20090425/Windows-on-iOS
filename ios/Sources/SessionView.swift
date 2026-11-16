@@ -4,12 +4,29 @@ import UIKit
 
 struct SessionView: View {
     @ObservedObject var vm: VMViewModel
+    @ObservedObject private var hardwareKeyboard = HardwareKeyboardState.shared
     private let uiHaptic = UIImpactFeedbackGenerator(style: .light)
 
     var body: some View {
+        VStack(spacing: 0) {
+            viewport
+            if hardwareKeyboard.isConnected && vm.isVMRunning {
+                GuestFunctionKeyRow(enabled: vm.activeSafariURL == nil)
+            }
+        }
+        .onAppear { if hardwareKeyboard.isConnected { vm.systemKeyboardVisible = false } }
+        .onChange(of: hardwareKeyboard.isConnected) { _, connected in
+            if connected { vm.systemKeyboardVisible = false }
+        }
+        .statusBarHidden(true)
+        .persistentSystemOverlays(.hidden)
+        .defersSystemGestures(on: .all)
+    }
+
+    private var viewport: some View {
         GeometryReader { geo in
             let size = geo.size
-            let laptopActive = vm.isLaptopLayoutActive(for: size)
+            let laptopActive = !hardwareKeyboard.isConnected && vm.isLaptopLayoutActive(for: size)
 
             ZStack {
                 Color(red: 0.02, green: 0.025, blue: 0.04).ignoresSafeArea()
@@ -49,10 +66,7 @@ struct SessionView: View {
                     .preferredColorScheme(.dark)
             }
         }
-        .ignoresSafeArea()
-        .statusBarHidden(true)
-        .persistentSystemOverlays(.hidden)
-        .defersSystemGestures(on: .all)
+        .ignoresSafeArea(.container, edges: hardwareKeyboard.isConnected ? [.top, .leading, .trailing] : .all)
     }
 
     // MARK: - 1. Sleek Midnight-Sapphire Surface Laptop Ultra Clamshell Mode (Folded)
@@ -129,7 +143,8 @@ struct SessionView: View {
                             withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
                                 vm.postureMode = .fullScreen
                             }
-                        }
+                        },
+                        inputEnabled: vm.isVMRunning && vm.activeSafariURL == nil
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 5.5, style: .continuous))
                     .overlay(
@@ -191,7 +206,9 @@ struct SessionView: View {
             // Sculpted Obsidian-Sapphire Studio Backdrop (eliminates dead-flat black letterbox bars!)
             studioObsidianBackdrop(size: geo.size)
 
-            if isPortrait {
+            if hardwareKeyboard.isConnected {
+                framedStudioDisplay(maxWidth: w - 16, maxHeight: h - 14)
+            } else if isPortrait {
                 // Unfolded Portrait Studio Canvas: Framed PixelSense Display + Sleek Studio Telemetry & Quick Deck
                 VStack(spacing: 14) {
                     Spacer(minLength: safeTop + (vm.controlBarVisible ? 44 : 8))
@@ -303,7 +320,8 @@ struct SessionView: View {
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.86)) {
                         vm.controlBarVisible.toggle()
                     }
-                }
+                },
+                inputEnabled: vm.isVMRunning && vm.activeSafariURL == nil
             )
             .clipShape(RoundedRectangle(cornerRadius: 8.5, style: .continuous))
             .padding(3.5)
@@ -339,7 +357,7 @@ struct SessionView: View {
                     Circle()
                         .fill(vm.isJITLive ? Color.white.opacity(0.75) : Color.orange)
                         .frame(width: 4.5, height: 4.5)
-                    Text("WIN11 ARM64 · 4.5 GB")
+                    Text("WIN11 ARM64")
                         .font(.system(size: 9.5, weight: .medium, design: .monospaced))
                         .foregroundStyle(Color.white.opacity(0.45))
                 }
@@ -371,8 +389,10 @@ struct SessionView: View {
                     WinIOSBridge.shared.sendKeyCombo(withModifiers: [NSNumber(value: 0xe3)], key: 0x08)
                 }
 
-                studioQuickTile(title: "Keyboard", icon: "keyboard", active: vm.systemKeyboardVisible) {
-                    vm.systemKeyboardVisible.toggle()
+                if !hardwareKeyboard.isConnected {
+                    studioQuickTile(title: "Keyboard", icon: "keyboard", active: vm.systemKeyboardVisible) {
+                        vm.systemKeyboardVisible.toggle()
+                    }
                 }
             }
         }
@@ -479,8 +499,10 @@ struct SessionView: View {
                     vm.toggleOAuthBrowserMode()
                 }
 
-                studioPillItem(icon: "keyboard", label: "Keys", active: vm.systemKeyboardVisible) {
-                    vm.systemKeyboardVisible.toggle()
+                if !hardwareKeyboard.isConnected {
+                    studioPillItem(icon: "keyboard", label: "Keys", active: vm.systemKeyboardVisible) {
+                        vm.systemKeyboardVisible.toggle()
+                    }
                 }
 
                 studioPillItem(

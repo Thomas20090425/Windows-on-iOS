@@ -2,8 +2,10 @@
 build/
 work/
 ios/deps/
+# Generated from tracked ios/project.yml by Build.command/build_ios_app.sh.
 ios/*.xcodeproj
 ios/DerivedData/
+distribution/
 
 # App bundles & object archives
 *.ipa

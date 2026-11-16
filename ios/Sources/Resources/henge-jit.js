@@ -1,207 +1,134 @@
-const CMD_DETACH = 0;
-const CMD_PREPARE_REGION = 1;
-const CMD_NEW_BREAKPOINTS = 2;
-const commands = {
-    [CMD_DETACH]: JIT26Detach,
-    [CMD_PREPARE_REGION]: JIT26PrepareRegion,
-    [CMD_NEW_BREAKPOINTS]: JIT26NewBreakpoints
-};
-const legacyCommands = {
-    [0x68]: JIT26NewBreakpoints,
-    [0x69]: JIT26HandleBrk0x69,
-    [0xf00d]: JIT26HandleBrk0xf00d
-};
-
+// SPDX-License-Identifier: GPL-2.0-or-later
+// The app substitutes the current process's exported handshake address before
+// sending this script to StikDebug. A generic debugger is never assumed ready.
+const helperAddressText = "__WINIOS_HELPER_ADDRESS__";
+const helperToken = 0x574a4954n;
+const maximumRegionBytes = 384n << 20n;
+let helperAddress;
 let tid, x0, x1, x16, pc;
-
+let stopped = false;
 let detached = false;
-let pid = get_pid();
-log(`pid = ${pid}`);
-let attachResponse = send_command(`vAttach;${pid.toString(16)}`);
-log(`attach_response = ${attachResponse}`);
-    
-let totalBreakpoints = 0;
-while (!detached) {
-    totalBreakpoints++;
-    log(`Handling breakpoint ${totalBreakpoints}`);
-    
-    let brkResponse = send_command(`c`);
-    log(`brkResponse = ${brkResponse}`);
-    
-    let tmpMatch = /T[0-9a-f]+thread:(?<tid>[0-9a-f]+);/.exec(brkResponse);
-    tid = tmpMatch ? tmpMatch.groups['tid'] : null;
-    tmpMatch = /20:(?<reg>[0-9a-f]{16});/.exec(brkResponse);
-    pc = tmpMatch ? tmpMatch.groups['reg'] : null;
-    tmpMatch = /10:(?<reg>[0-9a-f]{16});/.exec(brkResponse);
-    x16 = tmpMatch ? tmpMatch.groups['reg'] : null;
-    if (!tid || !pc || !x16) {
-        log(`Failed to extract registers: tid=${tid}, pc=${pc}, x16=${x16}`);
-        continue;
+
+try {
+    if (!/^[0-9a-f]+$/i.test(helperAddressText)) {
+        throw new Error("Missing current-app JIT handshake address. Request JIT from the updated app.");
     }
-    pc = littleEndianHexStringToNumber(pc);
-    x16 = littleEndianHexStringToNumber(x16);
-    
-    let instructionResponse = send_command(`m${pc.toString(16)},4`);
-    log(`instruction at pc: ${instructionResponse}`);
-    let instrU32 = littleEndianHexToU32(instructionResponse);
-    let brkImmediate = extractBrkImmediate(instrU32);
-    log(`BRK immediate: 0x${brkImmediate.toString(16)} (${brkImmediate})`);
-    if (legacyCommands[brkImmediate] != undefined) {
-        // when we find a valid brk immediate command, parse x0 and x1
-        tmpMatch = /00:(?<reg>[0-9a-f]{16});/.exec(brkResponse);
-        x0 = tmpMatch ? tmpMatch.groups['reg'] : null;
-        tmpMatch = /01:(?<reg>[0-9a-f]{16});/.exec(brkResponse);
-        x1 = tmpMatch ? tmpMatch.groups['reg'] : null;
-        if (!x0 || !x1) {
-            log(`Failed to extract registers: x0=${x0}, x1=${x1}`);
-            continue;
+    helperAddress = BigInt(`0x${helperAddressText}`);
+    if (helperAddress === 0n) throw new Error("Invalid JIT handshake address");
+    const pid = get_pid();
+    const attached = send_command(`vAttach;${pid.toString(16)}`);
+    log(`attach_response = ${attached}`);
+    if (!/^[TS][0-9a-f]{2}/i.test(attached)) {
+        throw new Error("StikDebug did not stop the requested app process");
+    }
+    stopped = true;
+    setHelperToken(helperToken);
+
+    for (let step = 0; step < 64 && !detached; step++) {
+        stopped = false;
+        const reply = send_command("c");
+        if (!/^T[0-9a-f]{2}/i.test(reply)) {
+            throw new Error(`Unexpected process response: ${reply}`);
         }
-        x0 = littleEndianHexStringToNumber(x0);
-        x1 = littleEndianHexStringToNumber(x1);
-        
-        // jump over brk
-        let pcPlus4 = numberToLittleEndianHexString(pc + 4n);
-        let pcPlus4Response = send_command(`P20=${pcPlus4};thread:${tid};`);
-        log(`pcPlus4Response = ${pcPlus4Response}`);
-        
-        // dispatch brk-immediate command
-        const command = legacyCommands[brkImmediate];
-        command(brkResponse);
-    } else {
-        log(`Skipping breakpoint: brk immediate 0x${brkImmediate.toString(16)} was not handled by this script. You could add it by evaluating legacyCommands[0x${brkImmediate.toString(16)}] = yourFunction;`);
-        continue;
-    }
-}
-
-function JIT26Detach() {
-    let detachResponse = send_command(`D`);
-    log(`detachResponse = ${detachResponse}`);
-    detached = true;
-}
-
-// brk 0x68
-function JIT26NewBreakpoints(brkResponse) {
-    let instructionResponse = send_command(`m${pc.toString(16)},4`);
-    log(`instruction at pc: ${instructionResponse}`);
-    let instrU32 = littleEndianHexToU32(instructionResponse);
-    let brkImmediate = extractBrkImmediate(instrU32);
-    
-    let memResponse = send_command(`m${x0.toString(16)},${x1}`);
-
-    let scriptText = hexToAscii(memResponse);
-    log(`Script text: ${scriptText}`);
-
-    const res = runScriptAndCapture(scriptText);
-    if (res.ok) {
-        log('Script succeeded:', res.value);
-    } else {
-        log('Script failed:', res.name, res.message);
-        log(res.stack);
-    }
-}
-
-// brk 0x69
-function JIT26HandleBrk0x69(brkResponse) {
-    let putX0Response = send_command(`P0=E0000069;thread:${tid};`);
-    log(`putX0Response = ${putX0Response}`);
-}
-
-// brk 0xf00d
-function JIT26HandleBrk0xf00d(brkResponse) {
-    // dispatch command via x16
-    const command = commands[x16];
-    if (command === undefined) {
-        log(`Unknown command ${x16.toString(16)}`);
-        return;
-    }
-    log(`Invoking command ${x16.toString(16)}`);
-    command(brkResponse);
-}
-
-function JIT26PrepareRegion(brkResponse) {
-    let instructionResponse = send_command(`m${pc.toString(16)},4`);
-    log(`instruction at pc: ${instructionResponse}`);
-    let instrU32 = littleEndianHexToU32(instructionResponse);
-    let brkImmediate = extractBrkImmediate(instrU32);
-    
-    if (x0 == 0n && x1 == 0n) {
-        return;
-    }
-
-    let jitPageAddress = x0;
-    if (x0 == 0n) {
-        let requestRXResponse = send_command(`_M${x1.toString(16)},rx`);
-        log(`requestRXResponse = ${requestRXResponse}`);
-        
-        if (!requestRXResponse || requestRXResponse.length === 0) {
-            log(`Failed to allocate RX memory`);
-            return;
+        stopped = true;
+        const threadMatch = /(?:^|;)thread:([0-9a-f]+);/i.exec(reply.slice(3));
+        tid = threadMatch ? threadMatch[1] : null;
+        const pcMatch = /(?:^|;)20:([0-9a-f]{16});/i.exec(reply.slice(3));
+        const commandMatch = /(?:^|;)10:([0-9a-f]{16});/i.exec(reply.slice(3));
+        if (!tid || !pcMatch || !commandMatch) {
+            throw new Error("Stopped process did not provide the required JIT registers");
         }
-        
-        jitPageAddress = BigInt(`0x${requestRXResponse}`);
-        log(`Allocated JIT page at address: 0x${jitPageAddress.toString(16)}`);
+        pc = littleEndianHexStringToNumber(pcMatch[1]);
+        x16 = littleEndianHexStringToNumber(commandMatch[1]);
+        const instruction = send_command(`m${pc.toString(16)},4`);
+        if (!/^[0-9a-f]{8}$/i.test(instruction)) {
+            throw new Error(`Cannot read stopped instruction at 0x${pc.toString(16)}`);
+        }
+        const opcode = littleEndianHexToU32(instruction);
+        if (((opcode & 0xffe0001f) >>> 0) !== 0xd4200000) {
+            throw new Error("Stopped instruction is not a JIT BRK; leaving the process stopped");
+        }
+        const immediate = (opcode >>> 5) & 0xffff;
+        if (immediate === 0x69) {
+            // RSP register values are full-width little-endian bytes.
+            writeRegister("0", 0xe0000069n);
+            writeRegister("20", pc + 4n);
+        } else if (immediate === 0xf00d && (x16 === 0n || x16 === 1n)) {
+            if (x16 === 0n) {
+                setHelperToken(0n);
+                writeRegister("20", pc + 4n);
+                const response = send_command("D");
+                if (response !== "OK") throw new Error(`Detach failed: ${response}`);
+                detached = true;
+                stopped = false;
+            } else {
+                const x0Match = /(?:^|;)00:([0-9a-f]{16});/i.exec(reply.slice(3));
+                const x1Match = /(?:^|;)01:([0-9a-f]{16});/i.exec(reply.slice(3));
+                if (!x0Match || !x1Match) throw new Error("JIT allocation registers unavailable");
+                x0 = littleEndianHexStringToNumber(x0Match[1]);
+                x1 = littleEndianHexStringToNumber(x1Match[1]);
+                if (x1 <= 0n || x1 > maximumRegionBytes || (x1 & 0x3fffn) !== 0n) {
+                    throw new Error("Invalid JIT allocation size");
+                }
+                let address = x0;
+                if (address === 0n) {
+                    const allocation = send_command(`_M${x1.toString(16)},rx`);
+                    if (!/^[0-9a-f]+$/i.test(allocation)) throw new Error(`RX allocation failed: ${allocation}`);
+                    address = BigInt(`0x${allocation}`);
+                }
+                if (address === 0n || address + x1 > 0x7000000000n || (address & 0x3fffn) !== 0n) {
+                    throw new Error("JIT allocation is outside the supported RX address range");
+                }
+                const prepared = prepare_memory_region(address, x1);
+                log(`prepare_memory_region = ${prepared}`);
+                writeRegister("0", address);
+                writeRegister("20", pc + 4n);
+            }
+        } else {
+            // Do not advance PC or continue a guest/host assertion, unknown
+            // command or unrelated breakpoint as though it were JIT setup.
+            throw new Error(`Unexpected BRK #${immediate.toString(16)} / command ${x16.toString(16)}; process remains stopped`);
+        }
     }
-
-    let prepareJITPageResponse = prepare_memory_region(jitPageAddress, x1);
-    log(`prepareJITPageResponse = ${prepareJITPageResponse}`);
-
-    let putX0Response = send_command(`P0=${numberToLittleEndianHexString(jitPageAddress)};thread:${tid};`);
-    log(`putX0Response = ${putX0Response}`);
+    if (!detached) throw new Error("JIT protocol ended without its detach command");
+} finally {
+    if (stopped && helperAddress !== undefined) {
+        try { setHelperToken(0n); }
+        catch (error) { log(`Could not clear JIT helper readiness: ${error}`); }
+    }
 }
 
-// utilities
-function littleEndianHexStringToNumber(hexStr) {
-    const bytes = [];
-    for (let i = 0; i < hexStr.length; i += 2) {
-        bytes.push(parseInt(hexStr.substr(i, 2), 16));
-    }
-    let num = 0n;
-    for (let i = 4; i >= 0; i--) {
-        num = (num << 8n) | BigInt(bytes[i]);
-    }
-    return num;
+function setHelperToken(value) {
+    const bytes = numberToLittleEndianHexString(value);
+    const response = send_command(`M${helperAddress.toString(16)},8:${bytes}`);
+    if (response !== "OK") throw new Error(`JIT helper handshake write failed: ${response}`);
+    const observed = send_command(`m${helperAddress.toString(16)},8`);
+    if (observed.toLowerCase() !== bytes) throw new Error("JIT helper handshake read-back mismatch");
 }
 
-function numberToLittleEndianHexString(num) {
-    const bytes = [];
-    for (let i = 0; i < 5; i++) {
-        bytes.push(Number(num & 0xFFn));
-        num >>= 8n;
-    }
-    while (bytes.length < 8) {
-        bytes.push(0);
-    }
-    return bytes.map(b => b.toString(16).padStart(2, '0')).join('');
+function writeRegister(register, value) {
+    const response = send_command(`P${register}=${numberToLittleEndianHexString(value)};thread:${tid};`);
+    if (response !== "OK") throw new Error(`Cannot write register ${register}: ${response}`);
 }
 
-function littleEndianHexToU32(hexStr) {
-    return parseInt(hexStr.match(/../g).reverse().join(''), 16);
-}
-
-function extractBrkImmediate(u32) {
-    return (u32 >> 5) & 0xFFFF;
-}
-
-function hexToAscii(hexStr) {
-    let str = '';
-    for (let i = 0; i < hexStr.length; i += 2) {
-        const byte = parseInt(hexStr.substr(i, 2), 16);
-        if (byte === 0) break; 
-        str += String.fromCharCode(byte);
+function littleEndianHexStringToNumber(value) {
+    if (!/^[0-9a-f]{16}$/i.test(value)) throw new Error("Invalid 64-bit register value");
+    let number = 0n;
+    for (let offset = 14; offset >= 0; offset -= 2) {
+        number = (number << 8n) | BigInt(parseInt(value.slice(offset, offset + 2), 16));
     }
-    return str;
+    return number;
 }
 
-function runScriptAndCapture(scriptText) {
-    try {
-        const value = eval(scriptText);
-        return { ok: true, value };
-    } catch (err) {
-        return {
-            ok: false,
-            name: err && err.name,
-            message: err && err.message,
-            stack: err && err.stack
-        };
+function numberToLittleEndianHexString(value) {
+    let bytes = "";
+    for (let index = 0; index < 8; index++) {
+        bytes += Number(value & 0xffn).toString(16).padStart(2, "0");
+        value >>= 8n;
     }
+    return bytes;
+}
+
+function littleEndianHexToU32(value) {
+    return parseInt(value.match(/../g).reverse().join(""), 16);
 }

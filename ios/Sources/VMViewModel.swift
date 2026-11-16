@@ -134,6 +134,7 @@ final class VMViewModel: ObservableObject {
     }
 
     func isLaptopLayoutActive(for size: CGSize) -> Bool {
+        if UIDevice.current.userInterfaceIdiom == .pad { return false }
         switch postureMode {
         case .laptop:
             return true
@@ -240,11 +241,13 @@ final class VMViewModel: ObservableObject {
 
     func onAppBecameActive() {
         let b = WinIOSBridge.shared
-        if !b.isJITLive && b.isDebuggerAttached {
+        // iPad selects a machine and its RAM reservation before requesting JIT.
+        // Acquiring here would reserve default RAM before library selection.
+        if UIDevice.current.userInterfaceIdiom != .pad && !b.isJITLive && b.isDebuggerAttached {
             _ = b.tryAcquireJIT(true)
         }
         syncFromBridge()
-        if b.isJITLive && !b.isVMRunning && !b.isUnpacking && b.hasProvisionedMachine() && !didAutoLaunchAttempt {
+        if UIDevice.current.userInterfaceIdiom != .pad && b.isJITLive && !b.isVMRunning && !b.isUnpacking && b.hasProvisionedMachine() && !didAutoLaunchAttempt {
             didAutoLaunchAttempt = true
             b.prepareAndStart(with: nil)
             syncFromBridge()
@@ -258,21 +261,30 @@ final class VMViewModel: ObservableObject {
     }
 
     func requestStikDebugJIT() {
-        guard let bundleID = Bundle.main.bundleIdentifier else { return }
-        var urlStr = "stikjit://enable-jit?bundle-id=\(bundleID)&pid=\(getpid())"
-        if let scriptPath = Bundle.main.path(forResource: "henge-jit", ofType: "js"),
-           let script = try? String(contentsOfFile: scriptPath, encoding: .utf8),
-           let data = script.data(using: .utf8) {
-            let b64 = data.base64EncodedString()
-                .replacingOccurrences(of: "+", with: "-")
-                .replacingOccurrences(of: "/", with: "_")
-                .trimmingCharacters(in: CharacterSet(charactersIn: "="))
-            if let encoded = b64.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
-                urlStr += "&script-data=\(encoded)"
-            }
+        guard let bundleID = Bundle.main.bundleIdentifier,
+              let scriptPath = Bundle.main.path(forResource: "henge-jit", ofType: "js"),
+              let template = try? String(contentsOfFile: scriptPath, encoding: .utf8),
+              template.contains("__WINIOS_HELPER_ADDRESS__"),
+              WinIOSBridge.shared.jitHelperTokenAddress != 0 else {
+            vmStatusText = "The JIT helper is missing or incompatible. Reinstall the current app."
+            return
         }
-        if let url = URL(string: urlStr) {
-            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+        let script = template.replacingOccurrences(of: "__WINIOS_HELPER_ADDRESS__", with: String(WinIOSBridge.shared.jitHelperTokenAddress, radix: 16))
+        let b64 = Data(script.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "="))
+        guard let encoded = b64.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "stikjit://enable-jit?bundle-id=\(bundleID)&pid=\(getpid())&script-data=\(encoded)") else {
+            vmStatusText = "Could not prepare the JIT helper request."
+            return
+        }
+        vmStatusText = "Opening StikDebug. Return to WindowsiOS and start the selected machine after the helper attaches."
+        UIApplication.shared.open(url, options: [:]) { [weak self] opened in
+            guard !opened else { return }
+            Task { @MainActor in
+                self?.vmStatusText = "StikDebug could not be opened. Install StikDebug or use launch_on_device.sh from your paired Mac."
+            }
         }
     }
 }

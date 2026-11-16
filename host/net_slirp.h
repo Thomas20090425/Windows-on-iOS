@@ -8,6 +8,8 @@
 void hv_net_set_share_socket(const char *path);
 /* User-mode NAT for the guest's virtio-net (see net_slirp.c). Returns 0 on success. */
 int hv_net_attach(HvMachine *m, HvVirtioNet *n);
+/* Optional single loopback TCP forward, configured before the network thread starts. */
+int hv_net_attach_with_forward(HvMachine *m, HvVirtioNet *n, int host_port, int guest_port);
 /* CPU thread, from the board's tick: hand frames for the guest to the device. */
 void hv_net_poll(void);
 /* Any thread: dynamically forward [::1]/127.0.0.1:host_port -> 10.0.2.15:guest_port (e.g. OAuth callbacks). */

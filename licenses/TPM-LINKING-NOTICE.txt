@@ -1,0 +1,14 @@
+WindowsiOS software TPM build
+
+WindowsiOS source files retain their GPL-2.0-or-later license notices. The iOS
+application linking OpenSSL 3 uses the GNU GPL version 3 option permitted by
+those notices. OpenSSL 3 is licensed under Apache License 2.0, which is
+compatible with GPL version 3 but not GPL version 2.
+
+Individual dependency licenses and copyright notices remain in effect. This
+folder includes the full GPL version 3, OpenSSL and libtpms license texts,
+source download locations/checksums and the local libtpms entropy patch.
+Corresponding WindowsiOS source and build scripts are in this repository.
+
+License compatibility reference:
+https://www.apache.org/licenses/GPL-compatibility

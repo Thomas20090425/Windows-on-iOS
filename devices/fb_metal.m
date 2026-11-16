@@ -93,7 +93,8 @@ static NSString *const kFbShaderSource =
         if (!timer) {
             dispatch_queue_t q = dispatch_queue_create("me.ammaar.windowsios.fbmetal", DISPATCH_QUEUE_SERIAL);
             timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
-            dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, NSEC_PER_SEC / 60, 2 * NSEC_PER_MSEC);
+            int hz = fb->presentation_hz == 30 || fb->presentation_hz == 120 ? fb->presentation_hz : 60;
+            dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, NSEC_PER_SEC / hz, 2 * NSEC_PER_MSEC);
             __weak HvFbMetalPresenter *weakSelf = self;
             dispatch_source_set_event_handler(timer, ^{
                 [weakSelf tick];
@@ -111,11 +112,13 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
     uint64_t hash = ((uint64_t)w << 32) ^ h ^ stride;
     uint32_t step_y = h > 128 ? h / 128 : 1;
     for (uint32_t y = 0; y < h; y += step_y) {
-        const uint64_t *row = (const uint64_t *)(px + (size_t)y * stride);
+        const uint8_t *row = px + (size_t)y * stride;
         uint32_t qwords = (w * 4) / 8;
         uint32_t step_x = qwords > 64 ? qwords / 64 : 1;
         for (uint32_t x = 0; x < qwords; x += step_x) {
-            hash = (hash ^ row[x]) * 0x9e3779b97f4a7c15ull;
+            uint64_t word;
+            memcpy(&word, row + (size_t)x * 8, 8);
+            hash = (hash ^ word) * 0x9e3779b97f4a7c15ull;
         }
     }
     return hash ? hash : 1;
@@ -125,25 +128,31 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
     @autoreleasepool {
         const uint8_t *px = NULL;
         uint32_t w = 0, h = 0, stride = 0;
-        if (hv_fb_display_get_frame(fb, &px, &w, &h, &stride) != 0) return;
+        if (hv_fb_display_lock_frame(fb, &px, &w, &h, &stride) != 0) return;
 
         os_unfair_lock_lock(&lock);
         CAMetalLayer *curLayer = layer;
         if (!curLayer || !device || !pipeline || !queue) {
             os_unfair_lock_unlock(&lock);
+            hv_fb_display_unlock_frame(fb);
             return;
         }
 
         CGSize dsize = curLayer.drawableSize;
         if (dsize.width < 4 || dsize.height < 4) {
             os_unfair_lock_unlock(&lock);
+            hv_fb_display_unlock_frame(fb);
             return;
         }
 
-        uint64_t hval = quick_frame_hash(px, w, h, stride);
+        /* GPU flushes explicitly signal updates, including a one-pixel change
+         * that sampling the framebuffer could miss. RAMFB has no dirty hook. */
+        uint64_t hval = fb->gpu_active ? (fb->generation << 1) | 1u :
+            quick_frame_hash(px, w, h, stride) & ~UINT64_C(1);
         BOOL sizeChanged = !CGSizeEqualToSize(dsize, lastDrawableSize);
         if (hval == lastHash && !sizeChanged && texW == w && texH == h) {
             os_unfair_lock_unlock(&lock);
+            hv_fb_display_unlock_frame(fb);
             return;
         }
 
@@ -157,11 +166,17 @@ static uint64_t quick_frame_hash(const uint8_t *px, uint32_t w, uint32_t h, uint
             texW = w;
             texH = h;
         }
+        if (!texture) {
+            os_unfair_lock_unlock(&lock);
+            hv_fb_display_unlock_frame(fb);
+            return;
+        }
 
         [texture replaceRegion:MTLRegionMake2D(0, 0, w, h)
                    mipmapLevel:0
                      withBytes:px
                    bytesPerRow:stride];
+        hv_fb_display_unlock_frame(fb);
 
         id<CAMetalDrawable> drawable = [curLayer nextDrawable];
         if (!drawable) {
@@ -231,13 +246,14 @@ int hv_fb_save_png(HvFbDisplay *fb, const char *path) {
     if (!fb || !path) return -1;
     const uint8_t *px = NULL;
     uint32_t w = 0, h = 0, stride = 0;
-    if (hv_fb_display_get_frame(fb, &px, &w, &h, &stride) != 0) return -1;
+    if (hv_fb_display_lock_frame(fb, &px, &w, &h, &stride) != 0) return -1;
 
     @autoreleasepool {
         size_t total = (size_t)stride * h;
         uint8_t *copy = malloc(total);
-        if (!copy) return -1;
+        if (!copy) { hv_fb_display_unlock_frame(fb); return -1; }
         memcpy(copy, px, total);
+        hv_fb_display_unlock_frame(fb);
         /* Ensure alpha byte is 0xff (XRGB8888 leaves X=0x00) */
         for (uint32_t y = 0; y < h; y++) {
             uint8_t *row = copy + (size_t)y * stride;
