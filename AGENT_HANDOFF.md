@@ -1,8 +1,9 @@
 # WindowsiOS agent handoff
 
 This is the portable continuation record for the iPad/Windows 11 work through
-**2026-11-15**, implementation commit **`661b8ae`** on
-**`codex/ipad-24h2-build`**. Read [README.md](README.md) first for current setup,
+**2026-11-15**, implementation commit **`661b8ae`**, originally developed on
+**`codex/ipad-24h2-build`**. The canonical development target is now **`main`**,
+as requested by the user. Read [README.md](README.md) first for current setup,
 [VALIDATION_REPORT.md](VALIDATION_REPORT.md) for evidence, and
 [PROGRESS_LOG.md](PROGRESS_LOG.md) for the chronological record. Later commits
 may update documentation without changing that implementation baseline.
@@ -134,8 +135,9 @@ Other versioned dependencies are libslirp `4.9.1`, GLib `2.83.0`, libffi
 `3.5.0`, and Mac helper `pymobiledevice3==11.55.1`. The libslirp build also
 stages its libintl/PCRE2 dependencies. The older network dependency script uses
 versioned URLs; do not describe all of those downloads as checksum-pinned.
-Optional StikJIT staging uses a local Husk reference if present and is not a
-requirement for the Mac batch helper.
+The dependency recipe no longer consults optional local Husk reference
+checkouts or stages unused StikJIT frameworks. A clean checkout uses the
+tracked preparation scripts and their declared downloads.
 
 Source retains **GPL-2.0-or-later**. The combined OpenSSL 3-linked iOS binary
 uses its permitted **GPLv3** option; full GPLv3 and linking notices accompany
@@ -178,11 +180,32 @@ Backend/link readiness is not evidence of Internet traffic.
 
 ## Build, artifacts and owner-run procedures
 
+The canonical public checkout is `main` in
+[Thomas20090425/Windows-on-iOS](https://github.com/Thomas20090425/Windows-on-iOS).
+The [main source ZIP](https://github.com/Thomas20090425/Windows-on-iOS/archive/refs/heads/main.zip)
+includes the app/engine source, configuration and dependency preparation
+scripts. The Xcode project is generated from tracked `ios/project.yml`.
+Generated projects, downloaded firmware/drivers/libraries and compiled products
+remain ignored because the build recreates them; no Windows media or signing
+identity is published.
+
+For a new checkout, the root **`Build.command`** is the double-click build entry
+point. Full Xcode/iOS SDK and Homebrew must already be installed. It checks
+Xcode, installs missing Homebrew build prerequisites and calls
+`scripts/build_ios_app.sh`, with two workers by default. First use needs
+Internet access. Default output is unsigned; own development signing is still
+needed to install. It does not execute tests, launch the app/VM or attach a
+debugger. The bootstrap is source-reviewed; do not treat the historical
+Release artifact below as evidence of a fresh bootstrap run.
+
 Use an Apple Silicon Mac with full Xcode/iOS SDK, XcodeGen, Python 3 and the
 cross-build tools described in [IPAD_INSTALLATION.md](IPAD_INSTALLATION.md).
 The dependency scripts use Meson, Ninja, pkg-config, gettext, Autoconf,
-Automake, Libtool, Perl and archive extraction tools including 7-Zip. Build
-inputs and outputs are cached locally. Network downloads may be substantial.
+Automake, Libtool, Perl and `bsdtar` for archive extraction. Host libslirp and
+7-Zip are not prerequisites for this app build; iOS libslirp is cross-compiled
+from its declared download. Build inputs and outputs are cached locally.
+Network downloads may be substantial. The double-click entry point records
+its log in `build/logs/one-click-build.log`.
 
 From the repository root, compile only:
 
@@ -339,7 +362,7 @@ new code and documentation updated to match the actual evidence.
 ## Copy-paste prompt for another agent
 
 ```text
-Continue WindowsiOS on branch codex/ipad-24h2-build. First read README.md,
+Continue WindowsiOS on main (the canonical branch). First read README.md,
 AGENT_HANDOFF.md, VALIDATION_REPORT.md and PROGRESS_LOG.md; inspect current
 git status/log so later work is preserved. The implementation baseline is
 661b8ae, with native iPad/ISO-only setup, bundled UEFI/TPM/ARM64 drivers,
@@ -358,6 +381,8 @@ detach or Windows boot result has been reported. Obtain the user's newest
 launcher/device result for the matching installed build, or their next
 feature goal, before choosing runtime work. Do not launch it yourself.
 Build outputs and logs are ignored, so another checkout must rebuild its
-own signed app. Read provenance/license docs before changing bundled pins.
+own signed app. Build.command is the download/double-click entry point after
+full Xcode and Homebrew are installed; it defaults to two workers and an
+unsigned compile. Read provenance/license docs before changing bundled pins.
 Document the exact change, compile evidence and remaining runtime limits.
 ```

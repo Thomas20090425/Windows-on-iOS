@@ -8,10 +8,30 @@ The latest features are build-verified only. Windows installation/boot, device
 input, Internet access, TPM recognition and dynamic resolution remain unverified.**
 No near-native performance result is claimed for this update.
 
-Development branch: [`codex/ipad-24h2-build`](https://github.com/Thomas20090425/Windows-on-iOS/tree/codex/ipad-24h2-build).
+Canonical branch: [`main`](https://github.com/Thomas20090425/Windows-on-iOS/tree/main).
 Latest implementation revision: [`661b8ae`](https://github.com/Thomas20090425/Windows-on-iOS/commit/661b8ae).
 Start with [the agent handoff](AGENT_HANDOFF.md) to continue development, or
 [the changelog](CHANGELOG.md) for the complete change history.
+
+## Download and build
+
+[**Download the complete source ZIP**](https://github.com/Thomas20090425/Windows-on-iOS/archive/refs/heads/main.zip),
+unzip it, and double-click **[Build.command](Build.command)** on your Mac.
+Install full Xcode with its iOS SDK and Homebrew first. The command checks the
+Xcode setup, installs missing Homebrew build tools, downloads/builds the
+required dependencies and produces `distribution/WindowsiOS.app` with two
+build workers. The first build needs Internet access and can take some time.
+
+The default is an **unsigned compile build**. Installing on your iPad/iPhone
+requires your own Apple development signing team and provisioned device; see
+[build and signing](#build-and-launch-from-a-mac). The command does not run
+tests, launch a VM or install anything on a device.
+
+All application/engine source, dependency preparation scripts and build
+configuration are in the repository. The Xcode project is generated from the
+tracked `ios/project.yml`; generated projects, downloaded dependencies and
+compiled app/IPA files are excluded from Git and recreated by the build.
+Your Windows ISO is supplied separately.
 
 ## What the current app includes
 
@@ -54,23 +74,30 @@ snapshots are unavailable; another VM session requires an app relaunch.
 
 ## Build and launch from a Mac
 
-Use full Xcode with the iOS SDK, its command-line tools, XcodeGen, Python 3 and
-the dependency prerequisites in [the installation guide](IPAD_INSTALLATION.md).
-The build script prepares pinned firmware, TPM dependencies and ARM64 driver
-resources automatically. Keep **two build workers** on this Mac.
+Use full Xcode with its iOS SDK and Homebrew. Double-click **Build.command**
+in the downloaded folder, or run it from Terminal after cloning `main`:
 
 ```sh
-git clone --branch codex/ipad-24h2-build https://github.com/Thomas20090425/Windows-on-iOS.git
+git clone https://github.com/Thomas20090425/Windows-on-iOS.git
 cd Windows-on-iOS
-JOBS=2 ./scripts/build_ios_app.sh
+./Build.command
 ```
+
+The entry point prepares missing build tools and calls the existing compile
+script. It keeps **two build workers** by default. If macOS asks how to open
+the downloaded command, open it with Terminal or run `bash Build.command` in
+that folder. See [the installation guide](IPAD_INSTALLATION.md) for prerequisites.
 
 That produces an unsigned compile artifact. To build a development-signed app
 and IPA, use your own signing team/profile and registered device:
 
 ```sh
-DEVELOPMENT_TEAM=YOUR_TEAM_ID JOBS=2 ./scripts/build_ios_app.sh
+DEVELOPMENT_TEAM=YOUR_TEAM_ID JOBS=2 ./Build.command
 ```
+
+If the build tools are already installed, the direct compile entry point remains
+`JOBS=2 ./scripts/build_ios_app.sh`. Both paths prepare pinned firmware, TPM
+dependencies and ARM64 driver resources automatically.
 
 Outputs are `distribution/WindowsiOS.app`,
 `distribution/WindowsiOS-development.ipa` for a signed build, and
@@ -120,7 +147,7 @@ instruction.** Documentation updates do not rebuild or revalidate the app.
 | [UTM configuration review](docs/UTM_CONFIGURATION_REVIEW.md) | Configuration mapping and engine differences. |
 | [Third-party notices](THIRD_PARTY_NOTICES.md) | Upstream attribution and dependency licenses. |
 
-To continue with another agent, share this branch and ask it to read
+To continue with another agent, share `main` and ask it to read
 `AGENT_HANDOFF.md`, `README.md` and `VALIDATION_REPORT.md` before editing. The
 handoff includes a ready-to-copy prompt; it preserves context independently of
 this conversation.

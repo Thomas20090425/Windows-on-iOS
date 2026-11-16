@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-11-15 — main source distribution and build entry point
+
+- Made `main` the canonical branch for public downloads and continuation.
+  The earlier `codex/ipad-24h2-build` name remains in historical milestones.
+- Added root `Build.command` for double-click compilation from either a Git
+  checkout or GitHub source ZIP. It checks full Xcode/Homebrew prerequisites,
+  prepares missing build tools and invokes the existing app/dependency build
+  with two workers by default. It honors development-signing configuration;
+  the default build is unsigned and performs no app/device/VM execution.
+- Removed unused dependency staging from optional ignored Husk checkouts;
+  the app build uses the tracked recipe and declared source downloads.
+- Added a prominent main source ZIP link and simplified download/build
+  instructions. Clarified that tracked source/configuration recreate ignored
+  generated Xcode projects, dependency payloads and app/IPA outputs.
+- Updated the installation guide and agent continuation prompt for `main`.
+  The latest existing Release artifact remains the build evidence below;
+  adding the bootstrap does not establish a new clean-checkout build result.
+
 ## 2026-11-15 — universal iPad / Windows 11 24H2 ARM64 work
 
 Branch: [`codex/ipad-24h2-build`](https://github.com/Thomas20090425/Windows-on-iOS/tree/codex/ipad-24h2-build).

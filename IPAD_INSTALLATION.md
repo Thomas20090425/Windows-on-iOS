@@ -29,11 +29,29 @@ been verified to boot Windows in this session. See [VALIDATION_REPORT.md](VALIDA
 
 ## Build and signing
 
-Use an Apple Silicon Mac with full Xcode, its iOS SDK, XcodeGen, Homebrew build
-tools (`meson`, `ninja`, `pkg-config`, `libslirp`, `gettext`, `autoconf`,
-`automake`, `libtool`, `sevenzip`), Perl and Python 3.
-The compiled artifact was built with Xcode 26.6 / iOS SDK 26.5.
+Use a Mac with full Xcode, its iOS SDK and Homebrew installed. The existing
+compiled artifact was built on Apple Silicon with Xcode 26.6 / iOS SDK 26.5.
+Download the [complete main source ZIP](https://github.com/Thomas20090425/Windows-on-iOS/archive/refs/heads/main.zip),
+unzip it and double-click **Build.command**, or use a normal clone:
 
+```bash
+git clone https://github.com/Thomas20090425/Windows-on-iOS.git
+cd Windows-on-iOS
+./Build.command
+```
+
+`Build.command` checks Xcode, installs missing Homebrew prerequisites and calls
+the existing app build with two workers by default. The first build downloads
+and compiles dependencies. It works from the ZIP without Git metadata. If
+needed, open it with Terminal or run `bash Build.command` in the downloaded
+folder. The default output is unsigned. No test, app, device, debugger or VM
+execution is part of this entry point.
+
+For the direct compile script, install XcodeGen, Python 3.9 or newer, Perl and the
+Homebrew build tools (`meson`, `ninja`, `pkg-config`, `gettext`, `autoconf`,
+`automake`, `libtool`), plus `bsdtar` for archive extraction. The app build
+cross-compiles its own iOS libslirp; host libslirp and 7-Zip are not needed.
+The double-click entry point records `build/logs/one-click-build.log`.
 From the repository root:
 
 ```bash
@@ -52,7 +70,7 @@ For development signing, use your own team and a profile registering your iPad:
 
 ```bash
 DEVELOPMENT_TEAM=YOUR_TEAM_ID \
-JOBS=2 ./scripts/build_ios_app.sh
+JOBS=2 ./Build.command
 ```
 
 With a matching local development identity and profile, this also creates
