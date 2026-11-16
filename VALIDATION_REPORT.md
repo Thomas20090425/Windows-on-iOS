@@ -17,6 +17,40 @@ inspection. No simulator, app, guest, debugger or performance workload was run.
 Baseline core regression checks had already completed before that instruction;
 they do not validate the subsequently added app/device changes.
 
+### Latest display and keyboard correction
+
+The user reported a fixed 800×600 desktop alongside the adjustable native
+VirtIO screen. The bundled driver installer now installs a CCD display helper
+that selects the identified connected VirtIO adapter as the sole active
+desktop, preserves its current mode when available and saves the topology.
+It also registers interactive sign-in selection; it does not change displays
+in Windows Setup's session 0 or remove the firmware adapter. Existing Windows
+installations need the updated `InstallDrivers.cmd` once, or can apply only the
+current desktop repair with `UseVirtioDisplay.cmd` on WINIOSDRVS.
+
+F1–F12 now starts hidden behind a floating F keys button and opens with a hide
+arrow over the full guest viewport. The row no longer reserves a bottom inset.
+The typing keyboard remains separate, and the viewport ignores keyboard safe
+area changes.
+
+Signed Release compilation succeeded with **Xcode 27.2 (27B52), iOS SDK 27.2**,
+two workers. Log: `build/logs/display-keyboard-overlay-build.log`. Signature
+verification and IPA archive integrity passed. Bundled helper source hashes
+match provenance; generated and bundled driver disks match its image hash.
+Local JIT symbol metadata was regenerated from the resulting app.
+
+Latest IPA SHA-256:
+
+```text
+1b641afd3f5d983b3e481b083368b351ac7f3d30a3b19a20543c76d325ed97dd
+```
+
+This supersedes earlier artifact details below. The PowerShell/C# helper was
+reviewed against the Windows CCD API, but was not executed or compiled in a
+Windows guest. No device, simulator, debugger, VM or test workload ran for
+this correction. Guest display switching and overlay interaction remain
+device-unverified.
+
 ### Public source and build entry point
 
 The source download includes the Swift, Objective-C, C and assembly app/engine

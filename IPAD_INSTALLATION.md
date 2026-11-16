@@ -78,7 +78,9 @@ With a matching local development identity and profile, this also creates
 limited to devices included in its embedded profile; it is not an App Store or
 universal sideload package. Do not commit provisioning profiles, certificates,
 private keys or Windows media. Use Xcode to provision your own iPad if needed.
-Automatic signing was used for the supplied artifact. Set
+The `DEVELOPMENT_TEAM` value must belong to an account signed in under Xcode >
+Settings > Accounts. Automatic signing can fetch or create a matching profile;
+an installed certificate or a profile from another team is not enough. Set
 `PROVISIONING_PROFILE_SPECIFIER` only for a manually managed profile; Xcode
 rejects Xcode-managed profiles when forced into manual signing mode.
 
@@ -305,10 +307,10 @@ can be deleted through the same confirmation flow.
 - Physical keyboard: HID key-down/up, modifiers, arrows, Escape, function keys
   and guest shortcuts. Command maps to the Windows key by default; optionally
   map it to Control. Some iPadOS-reserved shortcuts cannot reach the guest.
-- F1–F12 are available as an onscreen row in the iPad session. When a hardware
-  keyboard is connected, only that keyboard row is shown; the software keyboard
-  is hidden. Duo also switches to the full display with the F-key row when a
-  physical keyboard is connected.
+- Tap the floating **F keys** button to show F1–F12 over Windows; tap its down
+  arrow to hide them. The keys start hidden and never shrink the guest display.
+  **Typing keyboard** is a separate control. A physical keyboard hides the
+  software keyboard; the optional F-key overlay remains available.
 - Mouse/trackpad: absolute pointer, left/right/middle buttons, dragging, and
   horizontal/vertical scrolling. Windows handles double-click timing.
 - Touch: tap/drag, long press or two-finger tap for right-click, optional relative
@@ -338,7 +340,11 @@ can be deleted through the same confirmation flow.
   the VirtIO GPU 2D display and its EDID. The official bundled Windows resolution
   service applies mode changes after installation. Windows can also change the
   active mode in Display Settings. The firmware boot screen can remain 800×600
-  until the Windows driver starts. Host pinch zoom remains a separate viewport
+  until the Windows driver starts. The updated driver installer selects VirtIO
+  as the only active desktop and repeats that selection at sign-in. Existing
+  VMs must run the updated installer once; `UseVirtioDisplay.cmd` on WINIOSDRVS
+  also repairs the current desktop without reinstalling drivers.
+  Host pinch zoom remains a separate viewport
   control. See [driver and display setup](docs/WINDOWS_DRIVERS_AND_DISPLAY.md).
 - The virtual display supports 2D scanout, cursor and mode changes. Accelerated
   3D/DirectX and Apple GPU passthrough are unavailable.

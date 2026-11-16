@@ -42,7 +42,7 @@ Your Windows ISO is supplied separately.
 | TPM 2.0 | Real libtpms software TPM, firmware FIFO/TIS and Windows CRB/ACPI discovery, with persistent state per VM. This is software TPM support; no hardware-backed attestation or successful Windows enrollment is claimed. |
 | RAM | Enter any whole MiB from 4096 to the displayed device limit, leaving 3072 MiB physical host headroom and respecting the board map. An existing JIT reservation requires relaunch to change. |
 | CPU identity | Consistent **Arm Cortex-A76 r4p1 (virtual)** in the app and guest platform tables. The model name describes the virtual CPU. |
-| Mouse and keyboard | Revised left/right/middle button handling, persistent held-button state and F1–F12 guest keys. Connecting a physical keyboard hides the full software keyboard and keeps the F-key row. Physical behavior needs device verification. |
+| Mouse and keyboard | Revised left/right/middle button handling, persistent held-button state and F1–F12 guest keys. A floating F keys button opens a hideable row over Windows without shrinking the display. Physical behavior needs device verification. |
 | Apple Pencil | Tip contact and supported hover act as pointer input. Pressure, tilt, eraser and Windows Ink pen identity need a future virtual digitizer implementation. A driver alone cannot add them. |
 | Networking | libslirp NAT with bundled official ARM64 NetKVM drivers and improved backend/error handling. Enable NAT in VM settings. Actual guest Internet access is unverified. |
 | Display | VirtIO GPU **2D**, native-screen/window-fit/preset resolutions and preferred-mode changes through the bundled Windows service. Firmware keeps RAMFB. No accelerated 3D/DirectX or Apple GPU passthrough. |

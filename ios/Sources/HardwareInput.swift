@@ -33,10 +33,50 @@ struct GuestFunctionKeyRow: View {
                 }
             }.padding(8)
         }
+        .frame(height: 52)
         .buttonStyle(.plain)
         .background(.ultraThinMaterial)
         .disabled(!enabled)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Windows function keys")
+    }
+}
+
+/// Attach with `overlay`, so opening the keys never changes the guest viewport.
+struct GuestFunctionKeyOverlay: View {
+    var enabled = true
+    @State private var isExpanded = false
+
+    var body: some View {
+        HStack {
+            if isExpanded {
+                HStack(spacing: 0) {
+                    GuestFunctionKeyRow(enabled: enabled)
+                    Button("Hide function keys", systemImage: "chevron.down") {
+                        withAnimation { isExpanded = false }
+                    }
+                    .labelStyle(.iconOnly)
+                    .frame(width: 44, height: 44)
+                    .accessibilityHint("Keep Windows at full size and hide the key overlay.")
+                }
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .frame(maxWidth: 780)
+            } else {
+                Spacer(minLength: 0)
+                Button("F keys", systemImage: "keyboard") {
+                    withAnimation { isExpanded = true }
+                }
+                .font(.callout)
+                .padding(.horizontal, 14)
+                .frame(minHeight: 44)
+                .background(.ultraThinMaterial, in: Capsule())
+                .accessibilityLabel("Show function keys")
+                .accessibilityHint("Show F1 through F12 over the Windows display.")
+            }
+        }
+        .buttonStyle(.plain)
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(12)
     }
 }

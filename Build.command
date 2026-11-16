@@ -95,7 +95,7 @@ python3 -c 'import sys, lzma, ssl; sys.exit(sys.version_info < (3, 9))' || fail 
 
 echo "Building WindowsiOS with $JOBS workers. The first build downloads dependencies, firmware and drivers."
 if [[ -n "${DEVELOPMENT_TEAM:-}" ]]; then
-    echo "Development signing requested; your local signing identity and provisioning profile must be available."
+    echo "Development signing requested; Xcode needs an account for DEVELOPMENT_TEAM and a usable signing identity."
 else
     echo "Creating an unsigned compile artifact. Set DEVELOPMENT_TEAM to build a device-installable development app/IPA."
 fi

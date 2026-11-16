@@ -8,10 +8,10 @@ struct SessionView: View {
     private let uiHaptic = UIImpactFeedbackGenerator(style: .light)
 
     var body: some View {
-        VStack(spacing: 0) {
-            viewport
-            if hardwareKeyboard.isConnected && vm.isVMRunning {
-                GuestFunctionKeyRow(enabled: vm.activeSafariURL == nil)
+        viewport
+        .overlay(alignment: .bottom) {
+            if vm.isVMRunning {
+                GuestFunctionKeyOverlay(enabled: vm.activeSafariURL == nil)
             }
         }
         .onAppear { if hardwareKeyboard.isConnected { vm.systemKeyboardVisible = false } }
@@ -66,7 +66,7 @@ struct SessionView: View {
                     .preferredColorScheme(.dark)
             }
         }
-        .ignoresSafeArea(.container, edges: hardwareKeyboard.isConnected ? [.top, .leading, .trailing] : .all)
+        .ignoresSafeArea()
     }
 
     // MARK: - 1. Sleek Midnight-Sapphire Surface Laptop Ultra Clamshell Mode (Folded)

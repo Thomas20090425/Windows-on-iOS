@@ -17,6 +17,15 @@ was advancing slowly, projecting 22.2 minutes at that measured rate.
 
 ## Completed source work
 
+- Made the F1–F12 row default-hidden behind a floating F keys button. It opens
+  over the guest viewport and has a hide arrow; it no longer occupies a bottom
+  inset or resizes Windows. Typing keyboard is separate, and the iPad viewport
+  fills the screen even while the software keyboard is open.
+- Added a guest display-selection helper to the bundled driver disk. It
+  identifies the connected VirtIO PCI adapter, validates a single-display
+  topology and saves it with the firmware desktop disconnected. The installer
+  applies it interactively and registers it for sign-in; existing VMs need the
+  updated installer once. Boot RAMFB and both signed driver packages remain.
 - Added official pinned ARM64 NetKVM/display packages and resolution helpers
   as bundled read-only USB LUN2 media. Fresh setup stages drivers and attempts
   permanent helper installation; existing VMs can run the included logged
@@ -42,7 +51,7 @@ was advancing slowly, projecting 22.2 minutes at that measured rate.
   cap and 256 MiB step. Native/JIT reservation uses the exact requested amount
   within physical memory minus 3 GiB host headroom and the board memory map.
 - Added actual F1–F12 buttons and physical-keyboard detection. A connected
-  keyboard hides the full onscreen keyboard; Duo uses the display plus F row.
+  keyboard hides the full onscreen keyboard; the F row is now an optional overlay.
   Mouse state now includes direct GCMouse button edges and passive UIKit
   mouse/trackpad observation before UIView gesture cancellation, preserving
   external holds across hover, wheel and delayed synthetic-tap releases.
@@ -148,6 +157,14 @@ was advancing slowly, projecting 22.2 minutes at that measured rate.
   launch metadata was regenerated. No driver, simulator, debugger, device or
   VM execution; Internet access, guest driver trust and mode switching remain
   runtime-unverified.
+
+- The display/keyboard correction built successfully in signed Release with
+  Xcode 27.2 / iOS SDK 27.2 and two workers. Log:
+  `build/logs/display-keyboard-overlay-build.log`. App signature, IPA integrity,
+  helper hashes in bundled provenance and driver-disk hashes were checked;
+  local JIT symbol metadata was regenerated. No Windows, simulator, device,
+  debugger or tests ran. Guest topology selection and keyboard interaction
+  remain unverified on the user's device.
 
 ## Remaining external/runtime work
 

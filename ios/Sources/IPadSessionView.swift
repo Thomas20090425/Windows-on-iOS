@@ -22,6 +22,7 @@ struct IPadSessionView: View {
                 onThreeFingerTap: { withAnimation { controlsVisible.toggle() } },
                 inputEnabled: vm.isVMRunning && !settingsVisible && !confirmStop && vm.activeSafariURL == nil && scenePhase == .active
             )
+            .ignoresSafeArea()
             .accessibilityLabel("Windows guest display")
 
             if !vm.isVMRunning { startupStatus.padding(24).frame(maxWidth: 480).frame(maxHeight: .infinity) }
@@ -41,11 +42,14 @@ struct IPadSessionView: View {
                 Spacer()
             }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        .overlay(alignment: .bottom) {
             if vm.isVMRunning {
-                GuestFunctionKeyRow(enabled: !settingsVisible && !confirmStop && vm.activeSafariURL == nil && scenePhase == .active)
+                GuestFunctionKeyOverlay(enabled: !settingsVisible && !confirmStop && vm.activeSafariURL == nil && scenePhase == .active)
             }
         }
+        .statusBarHidden(true)
+        .persistentSystemOverlays(.hidden)
+        .defersSystemGestures(on: .all)
         .onAppear { if hardwareKeyboard.isConnected { vm.systemKeyboardVisible = false } }
         .onChange(of: hardwareKeyboard.isConnected) { _, connected in
             if connected { vm.systemKeyboardVisible = false }
@@ -130,7 +134,7 @@ struct IPadSessionView: View {
                 libraryButton
                 Divider().frame(height: 24)
                 if !hardwareKeyboard.isConnected {
-                    Button("Keyboard", systemImage: "keyboard") { vm.systemKeyboardVisible.toggle() }
+                    typingKeyboardButton
                 }
                 shortcutMenu
                 powerMenu
@@ -141,7 +145,7 @@ struct IPadSessionView: View {
             HStack(spacing: 12) {
                 libraryButton.labelStyle(.iconOnly)
                 if !hardwareKeyboard.isConnected {
-                    Button("Keyboard", systemImage: "keyboard") { vm.systemKeyboardVisible.toggle() }.labelStyle(.iconOnly)
+                    typingKeyboardButton.labelStyle(.iconOnly)
                 }
                 shortcutMenu.labelStyle(.iconOnly)
                 powerMenu.labelStyle(.iconOnly)
@@ -159,6 +163,11 @@ struct IPadSessionView: View {
             vm.systemKeyboardVisible = false
             dismiss()
         }
+    }
+
+    private var typingKeyboardButton: some View {
+        Button("Typing keyboard", systemImage: "keyboard") { vm.systemKeyboardVisible.toggle() }
+            .accessibilityLabel(vm.systemKeyboardVisible ? "Hide typing keyboard" : "Show typing keyboard")
     }
 
     private var hideButton: some View {

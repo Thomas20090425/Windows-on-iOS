@@ -308,6 +308,10 @@ if errorlevel 1 exit /b 1
 __COPY_COMMANDS__
 call :copyfile "%SOURCE%LICENSE.TXT" "%DEST%\LICENSE.TXT"
 if errorlevel 1 exit /b 1
+call :copyfile "%SOURCE%UseVirtioDisplay.ps1" "%DEST%\UseVirtioDisplay.ps1"
+if errorlevel 1 exit /b 1
+call :copyfile "%SOURCE%UseVirtioDisplay.cmd" "%DEST%\UseVirtioDisplay.cmd"
+if errorlevel 1 exit /b 1
 pnputil /add-driver "%DEST%\Drivers\NetKVM\netkvm.inf" /install
 set "RC=%errorlevel%"
 if not "%RC%"=="0" if not "%RC%"=="3010" exit /b %RC%
@@ -322,7 +326,15 @@ sc qc vgpusrv
 sc start vgpusrv
 set "RC=%errorlevel%"
 if not "%RC%"=="0" if not "%RC%"=="1056" exit /b %RC%
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%DEST%\UseVirtioDisplay.ps1" -Install
+if errorlevel 1 exit /b 1
+rem Windows Setup runs in session 0; select the desktop only in a user session.
+if /I not "%MODE%"=="setup" (
+  call "%DEST%\UseVirtioDisplay.cmd"
+  if errorlevel 1 echo Display selection is pending; it will retry at the next sign-in.
+)
 echo Drivers and the official VirtIO resolution service are installed.
+echo The VirtIO display is selected as the only desktop at each Windows sign-in.
 echo Restart Windows if prompted, or if display resizing is not yet available.
 echo Display is VirtIO GPU display-only; DirectX uses Windows software rendering.
 exit /b 0
@@ -373,6 +385,9 @@ def main():
     files["LICENSE.TXT"] = license_bytes
     files["WINIOSDRIVERS.TAG"] = b"WindowsiOS signed ARM64 driver media v1\r\n"
     files["InstallDrivers.cmd"] = INSTALL_COMMAND.replace("\n", "\r\n").encode("ascii")
+    for helper in ("UseVirtioDisplay.ps1", "UseVirtioDisplay.cmd"):
+        source = (ROOT / "scripts/windows" / helper).read_text(encoding="ascii")
+        files[helper] = source.replace("\n", "\r\n").encode("ascii")
     files["README.TXT"] = (
         "WindowsiOS Windows 11 ARM64 drivers\r\n"
         "NetKVM enables the virtual NAT Ethernet adapter.\r\n"
@@ -380,6 +395,9 @@ def main():
         "Run InstallDrivers.cmd as administrator in an existing Windows VM.\r\n"
         "It copies drivers/helpers into Program Files and installs the official VioGpu Resolution Service.\r\n"
         "The resolution helper remains on the Windows disk after this data disk is removed.\r\n"
+        "It selects VirtIO as the only active desktop, disconnecting the fixed firmware screen.\r\n"
+        "Run UseVirtioDisplay.cmd to repair display selection without reinstalling drivers.\r\n"
+        "Selection is retried at sign-in; log: %LOCALAPPDATA%\\WindowsiOS\\DisplaySetup.log.\r\n"
         "Logs: %ProgramData%\\WindowsiOS\\DriverInstall.log. Matching installed files are retained.\r\n"
         "New ISO installations stage these signed packages through Windows Setup.\r\n"
         "No test certificate, test-signing mode or signature bypass is used.\r\n"

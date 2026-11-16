@@ -90,8 +90,9 @@ are not implemented. Newly configured microphones default off.
   delayed synthetic releases do not release a real held button. This fixes
   source paths for left/right/middle clicks; user confirmation remains open.
 - Hardware F1–F12 generate actual HID usages `0x3a`–`0x45`. Detecting a
-  physical keyboard hides the full software keyboard and retains the F-key
-  row. iPadOS may retain some system shortcuts.
+  physical keyboard hides the full software keyboard. A floating F keys button
+  toggles the default-hidden row over the unchanged guest viewport; the typing
+  keyboard remains separate. iPadOS may retain some system shortcuts.
 - Apple Pencil currently provides pointer motion, hover where supported and
   tip/drag through the tablet path. **Pressure, tilt, eraser and Windows Ink
   digitizer reports are absent.** A guest driver alone cannot supply those
@@ -112,6 +113,13 @@ are not implemented. Newly configured microphones default off.
   binding its BLT-only GOP. The Windows INF matches generic
   `VEN_1AF4&DEV_1050`. Do not change that ID to `0x1100`/the firmware's `>=0x40`
   range without resolving the firmware boot-console limitation.
+- The bundled `UseVirtioDisplay.ps1` helper selects the identified connected
+  VirtIO path as the sole active Windows desktop, disconnecting the fixed
+  firmware desktop through CCD APIs. The driver installer copies it to Program
+  Files, registers an HKLM Run command for interactive sign-in and applies it
+  immediately outside Setup. Existing VMs need the updated installer once.
+  `UseVirtioDisplay.cmd` on WINIOSDRVS applies the current-session repair alone.
+  Do not disable/uninstall BasicDisplay or remove the boot RAMFB.
 - GPU support is **2D scanout and cursor**, with Metal host presentation.
   Accelerated 3D/DirectX, Virgl and Apple GPU passthrough are absent.
 
@@ -179,6 +187,14 @@ addresses are guest `10.0.2.15`, gateway `10.0.2.2`, DNS `10.0.2.3`.
 Backend/link readiness is not evidence of Internet traffic.
 
 ## Build, artifacts and owner-run procedures
+
+The latest display/keyboard correction built in signed Release with two workers
+on Xcode 27.2 / iOS SDK 27.2; log:
+`build/logs/display-keyboard-overlay-build.log`. The current app/IPA and manifest
+are in `distribution/`. Signature, IPA integrity, bundled helper/image hashes
+and local JIT symbol metadata were checked. No guest/test/device execution.
+The current artifact supersedes the older milestone table below; display
+topology selection still requires the user's Windows confirmation.
 
 The canonical public checkout is `main` in
 [Thomas20090425/Windows-on-iOS](https://github.com/Thomas20090425/Windows-on-iOS).
