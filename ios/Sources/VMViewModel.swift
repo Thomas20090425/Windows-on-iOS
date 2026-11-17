@@ -262,7 +262,7 @@ final class VMViewModel: ObservableObject {
 
     func requestStikDebugJIT() {
         guard let bundleID = Bundle.main.bundleIdentifier,
-              let scriptPath = Bundle.main.path(forResource: "henge-jit", ofType: "js"),
+              let scriptPath = Bundle(for: WinIOSBridge.self).path(forResource: "henge-jit", ofType: "js"),
               let template = try? String(contentsOfFile: scriptPath, encoding: .utf8),
               template.contains("__WINIOS_HELPER_ADDRESS__"),
               WinIOSBridge.shared.jitHelperTokenAddress != 0 else {

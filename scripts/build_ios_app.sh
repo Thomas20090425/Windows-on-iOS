@@ -9,6 +9,11 @@ JOBS="${JOBS:-2}"
 CONFIGURATION="${CONFIGURATION:-Release}"
 DIST_DIR="${DIST_DIR:-$ROOT/distribution}"
 DERIVED_DATA="${DERIVED_DATA:-$ROOT/build/DerivedData}"
+MEMORY_CAPABILITIES="${MEMORY_CAPABILITIES:-YES}"
+case "$MEMORY_CAPABILITIES" in
+    YES|NO) ;;
+    *) echo "MEMORY_CAPABILITIES must be YES or NO." >&2; exit 1 ;;
+esac
 mkdir -p "$DIST_DIR" "$ROOT/build/logs"
 
 for tool in xcodegen xcrun make; do
@@ -31,6 +36,27 @@ if [[ -n "${DEVELOPMENT_TEAM:-}" ]]; then
         signing=(CODE_SIGNING_ALLOWED=YES CODE_SIGN_STYLE=Manual "DEVELOPMENT_TEAM=$DEVELOPMENT_TEAM"
             CODE_SIGN_IDENTITY="Apple Development" "PROVISIONING_PROFILE_SPECIFIER=$PROVISIONING_PROFILE_SPECIFIER")
     fi
+fi
+if [[ -n "${BUNDLE_IDENTIFIER:-}" ]]; then
+    signing+=("PRODUCT_BUNDLE_IDENTIFIER=$BUNDLE_IDENTIFIER")
+fi
+if [[ -n "${APP_DISPLAY_NAME:-}" ]]; then
+    signing+=("APP_DISPLAY_NAME=$APP_DISPLAY_NAME")
+fi
+if [[ "$MEMORY_CAPABILITIES" == NO ]]; then
+    # Keep the original app identity usable with its existing wildcard profile.
+    # The file-backed RAM allocator does not require either optional capability.
+    basic_entitlements="$DERIVED_DATA/WindowsiOS-basic.entitlements"
+    mkdir -p "$DERIVED_DATA"
+    python3 - "$ROOT/ios/WindowsiOS.entitlements" "$basic_entitlements" <<'PY'
+import pathlib, plistlib, sys
+entitlements = plistlib.loads(pathlib.Path(sys.argv[1]).read_bytes())
+for key in ('com.apple.developer.kernel.increased-memory-limit',
+            'com.apple.developer.kernel.extended-virtual-addressing'):
+    entitlements.pop(key, None)
+pathlib.Path(sys.argv[2]).write_bytes(plistlib.dumps(entitlements))
+PY
+    signing+=("CODE_SIGN_ENTITLEMENTS=$basic_entitlements")
 fi
 xcodebuild -project "$ROOT/ios/WindowsiOS.xcodeproj" -scheme WindowsiOS \
     -configuration "$CONFIGURATION" -sdk iphoneos -destination 'generic/platform=iOS' \
@@ -59,7 +85,7 @@ if [[ -n "${DEVELOPMENT_TEAM:-}" ]]; then
 else
     echo "Unsigned compile artifact. Set DEVELOPMENT_TEAM to create a signed development IPA."
 fi
-python3 - "$DIST_DIR" <<'PY'
+python3 - "$DIST_DIR" "$MEMORY_CAPABILITIES" <<'PY'
 import datetime, hashlib, json, pathlib, plistlib, subprocess, sys
 dist = pathlib.Path(sys.argv[1])
 app = dist / 'WindowsiOS.app'
@@ -74,6 +100,8 @@ manifest = {
     'device_families': info['UIDeviceFamily'],
     'minimum_os': info['MinimumOSVersion'],
     'signing': 'development' if profile.exists() else 'unsigned',
+    'memory_capabilities_requested': sys.argv[2] == 'YES',
+    'guest_ram_fallback': 'lazy shared mapping with fully allocated temporary-file backing',
     'runtime_validation': 'NOT RUN: compilation and packaging only',
     'guest_cpu_model': 'Arm Cortex-A76 r4p1 (virtual)',
     'graphics': 'VirtIO GPU 2D with firmware RAMFB fallback; no accelerated 3D',
@@ -100,6 +128,18 @@ if profile.exists():
     manifest['provisioned_device_count'] = len(provisioning.get('ProvisionedDevices', []))
     manifest['profile_expiration_utc'] = provisioning['ExpirationDate'].isoformat() + 'Z'
     manifest['debugger_entitlement'] = provisioning.get('Entitlements', {}).get('get-task-allow', False)
+    signed_entitlements = plistlib.loads(subprocess.check_output(
+        ['codesign', '-d', '--entitlements', ':-', str(app)], stderr=subprocess.DEVNULL))
+    memory_keys = ('com.apple.developer.kernel.increased-memory-limit',
+                   'com.apple.developer.kernel.extended-virtual-addressing')
+    manifest['memory_entitlements'] = {
+        key: {'signature': signed_entitlements.get(key, False),
+              'profile': provisioning.get('Entitlements', {}).get(key, False)}
+        for key in memory_keys
+    }
+    for key in memory_keys:
+        if signed_entitlements.get(key) and not provisioning.get('Entitlements', {}).get(key):
+            raise SystemExit(f'Provisioning profile does not authorize {key}')
     ipa = dist / 'WindowsiOS-development.ipa'
     manifest['ipa_sha256'] = hashlib.sha256(ipa.read_bytes()).hexdigest()
 (dist / 'BUILD_INFO.json').write_text(json.dumps(manifest, indent=2) + '\n')

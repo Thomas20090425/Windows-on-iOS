@@ -28,6 +28,7 @@ enum VMDisplayResolution: String, Codable, CaseIterable, Identifiable {
 /// Runtime options understood by the existing engine.
 struct VMConfiguration: Codable, Equatable {
     var name: String = "Windows 11 ARM64"
+    var notes: String = ""
     var memoryMB: UInt64 = 4096
     var cpuCount: Int = 4
     var networkEnabled: Bool = true
@@ -50,7 +51,7 @@ struct VMConfiguration: Codable, Equatable {
     init(name: String = "Windows 11 ARM64") { self.name = name }
 
     private enum CodingKeys: String, CodingKey {
-        case name, memoryMB, cpuCount, networkEnabled, audioEnabled
+        case name, notes, memoryMB, cpuCount, networkEnabled, audioEnabled
         case primaryDiskReadOnly, sharedFolderEnabled, microphoneEnabled, displayRefreshRate
         case displayResolution, dynamicResolution
         case diagnosticLogging, tcpForwardHostPort, tcpForwardGuestPort
@@ -63,6 +64,7 @@ struct VMConfiguration: Codable, Equatable {
         self.init()
         let values = try decoder.container(keyedBy: CodingKeys.self)
         name = try values.decodeIfPresent(String.self, forKey: .name) ?? name
+        notes = try values.decodeIfPresent(String.self, forKey: .notes) ?? notes
         memoryMB = try values.decodeIfPresent(UInt64.self, forKey: .memoryMB) ?? memoryMB
         cpuCount = try values.decodeIfPresent(Int.self, forKey: .cpuCount) ?? cpuCount
         networkEnabled = try values.decodeIfPresent(Bool.self, forKey: .networkEnabled) ?? networkEnabled
@@ -96,6 +98,7 @@ struct VMConfiguration: Codable, Equatable {
     func validated() throws -> VMConfiguration {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               name.count <= 100 else { throw VMLibraryError.invalidName }
+        guard notes.count <= 20_000 else { throw VMLibraryError.invalidNotes }
         let noForward = tcpForwardHostPort == 0 && tcpForwardGuestPort == 0
         let validForward = (1024...65535).contains(tcpForwardHostPort) && (1...65535).contains(tcpForwardGuestPort)
         let memoryMapLimitMB: UInt64 = (0x4010000000 - 0x40000000) >> 20
@@ -139,12 +142,15 @@ enum VMMediaKind: String, CaseIterable, Identifiable {
 }
 
 enum VMLibraryError: LocalizedError {
-    case invalidName, invalidConfiguration, invalidMedia(String), alreadyExists(String), invalidDirectory
+    case invalidName, invalidNotes, invalidConfiguration, invalidMedia(String), alreadyExists(String), invalidDirectory
+    case operationInProgress
     case missingBundledFirmware, missingBundledDrivers, insufficientStorage(required: Int64, available: Int64), cannotCreateDisk
     case machineInUse
     var errorDescription: String? {
         switch self {
         case .invalidName: return "Enter a machine name between 1 and 100 characters."
+        case .invalidNotes: return "Keep machine notes within 20,000 characters."
+        case .operationInProgress: return "Wait for the current file operation to finish before saving settings."
         case .invalidConfiguration: return "Choose valid CPU, memory, refresh rate and input settings. A TCP forward requires a host port in 1024–65535 and guest port in 1–65535, or both 0 to disable it."
         case .invalidMedia(let reason): return reason
         case .alreadyExists(let file): return "\(file) already exists. Import into a new machine to preserve existing data."

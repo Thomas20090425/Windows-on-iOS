@@ -107,6 +107,9 @@ def build_manifest(app, bundle_id=None):
     # Xcode Debug can use a tiny executable plus a separately loaded debug
     # dylib. Both UUIDs matter; Release addresses cannot be reused for Debug.
     paths = [executable, *sorted(app.glob("*.debug.dylib"))]
+    backend = app / 'Frameworks/WindowsBackend.framework/WindowsBackend'
+    if backend.is_file():
+        paths.append(backend)
     images = [read_image(path) for path in paths]
     if not any(all(name in image["symbols"] for name in REQUIRED) for image in images):
         raise ValueError(f"This local app lacks current JIT helper symbols: {app}. Rebuild it or pass APP_PATH pointing to the matching current .app.")

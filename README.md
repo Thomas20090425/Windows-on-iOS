@@ -8,6 +8,16 @@ The latest features are build-verified only. Windows installation/boot, device
 input, Internet access, TPM recognition and dynamic resolution remain unverified.**
 No near-native performance result is claimed for this update.
 
+**Unified UTM app:** UTM's actual frontend now builds with the Windows ARM64
+and Henge macOS engines embedded in one signed iPad app. Native VM bundles,
+creation/settings, direct engine sessions and framework-aware JIT launchers
+are implemented. See [UTM ARM Lab](docs/UNIFIED_UTM.md) for build commands and
+the distinction between build checks and device runtime validation.
+The earlier standalone Henge baseline restored Sequoia 15.6.1 from Apple,
+booted with 6 GiB, and was later observed running the user's desktop with
+8 GiB. Its active benchmark is being preserved during integration.
+See [baseline device evidence](docs/VIRTUALIZATION_RESEARCH.md).
+
 Canonical branch: [`main`](https://github.com/Thomas20090425/Windows-on-iOS/tree/main).
 Latest implementation revision: [`661b8ae`](https://github.com/Thomas20090425/Windows-on-iOS/commit/661b8ae).
 Start with [the agent handoff](AGENT_HANDOFF.md) to continue development, or
@@ -92,8 +102,16 @@ That produces an unsigned compile artifact. To build a development-signed app
 and IPA, use your own signing team/profile and registered device:
 
 ```sh
-DEVELOPMENT_TEAM=YOUR_TEAM_ID JOBS=2 ./Build.command
+DEVELOPMENT_TEAM=YOUR_TEAM_ID BUNDLE_IDENTIFIER=com.yourname.windowsios JOBS=2 ./Build.command
 ```
+
+Use an identifier owned by your signing team: the build requests Increased
+Memory Limit and Extended Virtual Addressing, which require an eligible
+explicit provisioning profile. The original `me.ammaar.windowsios` identifier
+cannot be registered by another team. See [memory and signing](IPAD_INSTALLATION.md#memory-allowance-and-signing-identity).
+`MEMORY_CAPABILITIES=NO` builds without those optional capabilities using an
+eligible existing profile. The exact-size file-backed guest RAM fallback also
+works in this mode; the OS can still refuse a large virtual mapping.
 
 If the build tools are already installed, the direct compile entry point remains
 `JOBS=2 ./scripts/build_ios_app.sh`. Both paths prepare pinned firmware, TPM

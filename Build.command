@@ -13,7 +13,7 @@ finish() {
     trap - EXIT
     echo
     if [[ "$status" -eq 0 ]]; then
-        echo "Build completed. Products: $ROOT/distribution/"
+        echo "Build completed. Products: ${DIST_DIR:-$ROOT/distribution}/"
     else
         echo "Build stopped (exit $status). Resolve the message above and open Build.command again." >&2
     fi

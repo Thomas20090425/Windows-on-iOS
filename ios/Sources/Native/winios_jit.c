@@ -17,9 +17,11 @@
 #include <mach/vm_map.h>
 #include <os/log.h>
 #include <os/proc.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -99,29 +101,160 @@ static bool g_trap_handler_installed;
 static WinIosDualMapping g_mapping;
 static void *g_guest_ram;
 static uint64_t g_guest_ram_bytes;
+static WinIosGuestRamKind g_ram_kind = WINIOS_GUEST_RAM_NONE;
+static bool g_ledger_allocation_failed;
 static uint64_t g_requested_guest_mb = 4096;
 static atomic_bool g_jit_live;
 static char g_status[256] = "Not initialized";
+static pthread_mutex_t g_ram_status_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_ram_allocation_lock = PTHREAD_MUTEX_INITIALIZER;
+static char g_ram_status[512] = "Guest RAM has not been reserved.";
 
-static void prealloc_ledger_exempt_ram(void) {
+static void set_ram_status(const char *message) {
+    pthread_mutex_lock(&g_ram_status_lock);
+    snprintf(g_ram_status, sizeof g_ram_status, "%s", message);
+    pthread_mutex_unlock(&g_ram_status_lock);
+}
+
+/* Caller holds the status lock. */
+static void describe_ram_mapping_locked(uint64_t memory_mb, WinIosGuestRamKind kind) {
+    if (kind == WINIOS_GUEST_RAM_FILE_BACKED)
+        snprintf(g_ram_status, sizeof g_ram_status,
+                 "Reserved exactly %llu MiB in a disk-backed guest mapping with allocated storage. Pages are loaded on demand; this is not a physical RAM commitment.",
+                 (unsigned long long)memory_mb);
+    else
+        snprintf(g_ram_status, sizeof g_ram_status,
+                 "Reserved exactly %llu MiB in a ledger-exempt guest mapping. This does not commit all physical pages.",
+                 (unsigned long long)memory_mb);
+}
+
+void winios_jit_copy_guest_ram_status(char *buffer, size_t size) {
+    if (!buffer || !size) return;
+    pthread_mutex_lock(&g_ram_status_lock);
+    snprintf(buffer, size, "%s", g_ram_status);
+    pthread_mutex_unlock(&g_ram_status_lock);
+}
+
+/* Serialized with startup reservation; diagnostic readers use the status lock. */
+static void prealloc_ledger_exempt_ram_locked(void) {
     if (g_guest_ram) return;
+    if (getenv("HV_RAM_NO_LEDGER")) {
+        set_ram_status("Ledger-exempt allocation is disabled; a disk-backed guest mapping will be reserved at startup.");
+        return;
+    }
     uint64_t phys_mem = 0;
     size_t len = sizeof phys_mem;
-    sysctlbyname("hw.memsize", &phys_mem, &len, NULL, 0);
+    if (sysctlbyname("hw.memsize", &phys_mem, &len, NULL, 0) != 0) {
+        int error = errno;
+        set_ram_status("Physical RAM query failed; guest RAM was not reserved by the JIT helper.");
+        WINIOS_LOG("guest RAM physical-memory query failed: errno %d (%s)", error, strerror(error));
+        return;
+    }
     /* Reserve the configured Windows 11 minimum or larger, without silently
      * shrinking the guest or assuming the memory ledger exception will work. */
     uint64_t mb = g_requested_guest_mb;
     if (mb >= HV_GUEST_MIN_MEMORY_MB && mb <= hv_guest_memory_limit_mb(phys_mem)) {
         uint8_t *p = hv_alloc_no_footprint(mb << 20);
         if (p) {
+            pthread_mutex_lock(&g_ram_status_lock);
             g_guest_ram = p;
             g_guest_ram_bytes = mb << 20;
+            g_ram_kind = WINIOS_GUEST_RAM_LEDGER_EXEMPT;
+            pthread_mutex_unlock(&g_ram_status_lock);
+            set_ram_status("JIT helper reserved a ledger-exempt guest mapping. Reservation does not commit all physical pages.");
             WINIOS_LOG("pre-allocated %llu MiB ledger-exempt Guest RAM at %p",
                        (unsigned long long)mb, (void *)p);
             return;
         }
+        g_ledger_allocation_failed = true;
+        set_ram_status("Ledger-exempt allocation was refused; startup will try an exact-size disk-backed guest mapping. See the kernel allocation error in the device log.");
+    } else {
+        set_ram_status("Requested RAM is outside the physical-memory admission range; guest RAM was not reserved.");
+        WINIOS_LOG("guest RAM reservation skipped: requested=%llu MiB physical=%llu MiB maximum=%llu MiB",
+                   (unsigned long long)mb, (unsigned long long)(phys_mem >> 20),
+                   (unsigned long long)hv_guest_memory_limit_mb(phys_mem));
     }
     WINIOS_LOG("ledger-exempt Guest RAM pre-allocation unavailable; will fall back at VM start");
+}
+
+static void prealloc_ledger_exempt_ram(void) {
+    pthread_mutex_lock(&g_ram_allocation_lock);
+    prealloc_ledger_exempt_ram_locked();
+    pthread_mutex_unlock(&g_ram_allocation_lock);
+}
+
+bool winios_jit_reserve_guest_ram(uint64_t memory_mb, const char *backing_template,
+                                 char *error, size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (memory_mb < HV_GUEST_MIN_MEMORY_MB || memory_mb > HV_GUEST_MAP_MAX_MEMORY_MB ||
+            memory_mb > (uint64_t)(SIZE_MAX >> 20)) {
+        if (error && error_size)
+            snprintf(error, error_size, "Guest RAM request %llu MiB is outside the supported mapping range.",
+                     (unsigned long long)memory_mb);
+        return false;
+    }
+
+    uint64_t bytes = memory_mb << 20;
+    pthread_mutex_lock(&g_ram_allocation_lock);
+    if (g_guest_ram && g_guest_ram_bytes == bytes) {
+        pthread_mutex_lock(&g_ram_status_lock);
+        describe_ram_mapping_locked(memory_mb, g_ram_kind);
+        pthread_mutex_unlock(&g_ram_status_lock);
+        pthread_mutex_unlock(&g_ram_allocation_lock);
+        return true;
+    }
+
+    uint8_t *mapping = NULL;
+    WinIosGuestRamKind kind = WINIOS_GUEST_RAM_NONE;
+    if (!g_ledger_allocation_failed && !getenv("HV_RAM_NO_LEDGER")) {
+        mapping = hv_alloc_no_footprint(bytes);
+        if (mapping) kind = WINIOS_GUEST_RAM_LEDGER_EXEMPT;
+        else g_ledger_allocation_failed = true;
+    }
+    char allocation_error[512] = {0};
+    if (!mapping) {
+        mapping = hv_alloc_file_backed_ram(bytes, backing_template, allocation_error, sizeof allocation_error);
+        if (mapping) kind = WINIOS_GUEST_RAM_FILE_BACKED;
+    }
+    if (!mapping) {
+        if (!allocation_error[0])
+            snprintf(allocation_error, sizeof allocation_error, "Cannot reserve %llu MiB of disk-backed guest RAM.",
+                     (unsigned long long)memory_mb);
+        if (error && error_size) snprintf(error, error_size, "%s", allocation_error);
+        char status[512];
+        snprintf(status, sizeof status, "Reservation failed: %.320s Previous reservation retained: %llu MiB.",
+                 allocation_error, (unsigned long long)(g_guest_ram_bytes >> 20));
+        set_ram_status(status);
+        WINIOS_LOG("guest RAM reservation failed: %s", allocation_error);
+        pthread_mutex_unlock(&g_ram_allocation_lock);
+        return false;
+    }
+
+    pthread_mutex_lock(&g_ram_status_lock);
+    void *old_mapping = g_guest_ram;
+    uint64_t old_bytes = g_guest_ram_bytes;
+    WinIosGuestRamKind old_kind = g_ram_kind;
+    g_guest_ram = mapping;
+    g_guest_ram_bytes = bytes;
+    g_ram_kind = kind;
+    describe_ram_mapping_locked(memory_mb, kind);
+    pthread_mutex_unlock(&g_ram_status_lock);
+
+    if (old_mapping) {
+        if (old_kind == WINIOS_GUEST_RAM_FILE_BACKED) {
+            if (munmap(old_mapping, (size_t)old_bytes) != 0)
+                WINIOS_LOG("previous disk-backed guest mapping release failed: errno %d (%s)", errno, strerror(errno));
+        } else {
+            kern_return_t kr = vm_deallocate(mach_task_self(), (vm_address_t)old_mapping, (vm_size_t)old_bytes);
+            if (kr != KERN_SUCCESS)
+                WINIOS_LOG("previous ledger guest mapping release failed: %s (kernel code %d)", mach_error_string(kr), kr);
+        }
+    }
+    WINIOS_LOG("reserved %llu MiB guest RAM using %s mapping at %p",
+               (unsigned long long)memory_mb,
+               kind == WINIOS_GUEST_RAM_FILE_BACKED ? "disk-backed" : "ledger-exempt", (void *)mapping);
+    pthread_mutex_unlock(&g_ram_allocation_lock);
+    return true;
 }
 
 void winios_jit_set_guest_memory_mb(uint64_t memory_mb) {
@@ -184,6 +317,17 @@ size_t winios_available_memory_bytes(void) {
 #else
     return 4ull << 30;
 #endif
+}
+
+bool winios_process_footprint_bytes(uint64_t *out_bytes) {
+    if (!out_bytes) return false;
+    *out_bytes = 0;
+    task_vm_info_data_t info = {0};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    kern_return_t kr = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count);
+    if (kr != KERN_SUCCESS || count < TASK_VM_INFO_REV1_COUNT) return false;
+    *out_bytes = info.phys_footprint;
+    return true;
 }
 
 static void release_low_hold(size_t bytes) {
@@ -263,6 +407,7 @@ bool winios_jit_acquire(size_t bytes, bool detach_after) {
                     WinIosDualMapping m = {(uint8_t *)rw, rx, bytes};
                     if (jit_selftest(&m)) {
                         g_mapping = m;
+                        set_ram_status("Plain RX/RW JIT is active; guest RAM will use the normal allocator at VM startup.");
                         atomic_store(&g_jit_live, true);
                         set_status("Live (%zu MiB plain RX/RW)", bytes >> 20);
                         return true;
@@ -374,8 +519,18 @@ WinIosDualMapping winios_jit_mapping(void) {
 }
 
 void *winios_jit_guest_ram(uint64_t *out_bytes) {
+    pthread_mutex_lock(&g_ram_status_lock);
     if (out_bytes) *out_bytes = g_guest_ram_bytes;
-    return g_guest_ram;
+    void *ram = g_guest_ram;
+    pthread_mutex_unlock(&g_ram_status_lock);
+    return ram;
+}
+
+WinIosGuestRamKind winios_jit_guest_ram_kind(void) {
+    pthread_mutex_lock(&g_ram_status_lock);
+    WinIosGuestRamKind kind = g_ram_kind;
+    pthread_mutex_unlock(&g_ram_status_lock);
+    return kind;
 }
 
 const char *winios_jit_status_text(void) {

@@ -1,6 +1,20 @@
 # UTM configuration reference and WindowsiOS mapping
 
+The latest request supersedes the separate-app interface described below:
+use UTM's actual frontend and embed both native engines in one app. See
+[UTM ARM Lab](UNIFIED_UTM.md) for that implementation and validation status.
+
 Reviewed on 2026-11-15. UTM's official documentation and current public configuration source were used as design references. No UTM source code was copied. WindowsiOS continues to use its existing ARM64 translator and virtual hardware; it does not embed QEMU, SPICE, Apple's Virtualization framework or UTM.
+
+Later the same day, the user requested a full source-backed UTM/macOS
+experiment. Pinned UTM was cloned, built with official native dependencies,
+signed and installed as a separate companion. Source-built Henge restored and
+booted Sequoia on the M5 iPad with Metal replay. WindowsiOS now has nine
+settings pages, draft Save/Cancel, notes/search and an Engines hub. The table
+below still describes the Windows engine's capabilities; arbitrary `.utm`
+handling belongs to the installed full UTM app. See
+[research results](VIRTUALIZATION_RESEARCH.md) for actual runtime evidence and
+the separate-app boundary.
 
 ## Configuration structure
 

@@ -1,0 +1,43 @@
+{
+  "repository": "https://github.com/Leviidev/Henge",
+  "source_commit": "7b557301195f130f900b1b4cd105c9ecf0fbc109",
+  "source_patch": "scripts/patches/henge-research.patch",
+  "source_patch_sha256": "d4a2b16f898e17f02840ef8f17c89e936ddd024cff63102bb10706ec9a074efd",
+  "build_script": "scripts/build_henge_reference.sh",
+  "default_bundle_identifier": "com.thomas20090425.henge",
+  "default_helper_identifier": "com.thomas20090425.henge.JITHelper",
+  "default_output_directory": "distribution/henge-reference-build",
+  "dependencies": {
+    "husk": {
+      "repository": "https://github.com/Leviidev/Husk",
+      "commit": "afe83d45b31194c4cc9f7b3db7ec2c757db8346e",
+      "component": "libhusk_rppairing.a; Cargo.lock pins the Rust dependency graph",
+      "license": "GPL-2.0-or-later; dependency notices generated and bundled"
+    },
+    "stikjit": {
+      "repository": "https://github.com/StikDebug/StikJIT",
+      "version": "1.9.0",
+      "commit": "32287268fa5824f9edce4cb359f5833ce0cf7b00",
+      "patch": "ci/stikjit-high-address.patch in the pinned Henge checkout",
+      "patch_sha256": "1939163ee0f433523c8baf3245a023be6a11fd334c0964da821f411acda41f89",
+      "license": "MPL-2.0; idevice MIT"
+    },
+    "rust_toolchain": "1.100.0",
+    "rust_target": "aarch64-apple-ios",
+    "networking": {
+      "builder": "scripts/build_ios_deps.sh",
+      "libslirp": "4.9.1",
+      "glib": "2.83.0",
+      "pcre2": "10.44",
+      "libintl": "glib proxy-libintl subproject",
+      "libslirp_source_sha256": "3970542143b7c11e6a09a4d2b50f30a133473c41f15ed0bdcc3b7a1c450d9a5c",
+      "glib_source_sha256": "a07d9e1a57a4279c5ece71c26dc44eea12bd518ea9ff695d53e722997032b614",
+      "libffi_source_sha256": "8c72678628a5dd8782f08ad421d5a441e42c1c5c1b33e0bc211cbfcf1f3b3978",
+      "licenses": "libslirp/pcre2 BSD; glib and proxy-libintl LGPL-2.1-or-later"
+    },
+    "restore": "Pinned Henge third_party sources; libirecovery, usbmuxd, idevicerestore, libplist, libimobiledevice, libtatsu, libzip and build dependencies. See docs/licensing.md."
+  },
+  "license": "Henge combined binary GPL-2.0-or-later, potentially GPL-3.0 through idevicerestore; all source and dependency notices are preserved. Apple macOS images and AVPBooter are not part of the app or repository.",
+  "architecture": "Stock iPadOS uses Henge's software arm64-to-arm64 JIT and software MMU. Guest PVG commands are replayed with Metal. This path does not use EL2, Apple Hypervisor.framework, or Virtualization.framework on iPad.",
+  "scope": "Separate Henge macOS research app and guest-only restore transport; WindowsiOS remains a separate app and engine. Build success does not establish guest boot, graphics correctness, or performance."
+}

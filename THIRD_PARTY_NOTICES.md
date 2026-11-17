@@ -198,7 +198,38 @@ During offline Windows 11 image provisioning (`scripts/provision_windows_arm64.p
 
 ## 8. Non-Redistributed Proprietary Guest Software
 
-The following proprietary operating system and application packages are **never** included in this repository, are excluded via [`.gitignore`](.gitignore), and are fetched/installed strictly on the user's own machine into `work/`:
+The following proprietary operating system and application packages are **never** included in this repository, are excluded via [`.gitignore`](.gitignore), and are fetched/installed only on the user's own computer or device, outside tracked source:
 
 - **Microsoft Windows 11 24H2 ARM64** (`Build 26100`) — Property of Microsoft Corporation, governed by the Microsoft Software License Terms. Users supply their own official Microsoft retail ARM64 ESD/ISO (`work/downloads/Win11_24H2_ARM64_en-us.esd`).
 - **Google Antigravity (`2.31.0` Windows ARM64)** — Property of Google LLC, governed by its respective terms of service.
+- **Apple macOS Sequoia 15.6.1 and AVPBooter** — fetched from Apple's CDN into
+  the separately installed Henge research app's private iPad container. No
+  restore image, boot ROM or macOS guest disk is included in Git or the app
+  binary. The guest restore is for the user's own device.
+
+## 9. UTM and Henge research applications
+
+UTM `5d5e1b180be867c795bbeb03ed80087518c0cdae` is cloned and built separately.
+Its frontend/configuration source is Apache-2.0; its QEMU, SPICE and native
+dependencies retain their respective GPL/LGPL/BSD and other upstream terms.
+The complete source tree and bundled native dependency notices are preserved.
+The installed artifact includes an ExtensionKit helper and official native
+sysroot; source/artifact pins are in `research/utm-source.json`.
+
+Henge `7b557301195f130f900b1b4cd105c9ecf0fbc109` is GPL-2.0-or-later, with a
+combined binary potentially governed by GPLv3 through idevicerestore. Its
+Husk pairing dependency is GPL-2.0-or-later; StikJIT1.9.0 is MPL-2.0 and uses
+MIT-licensed idevice. The applicable Rust/networking/restore notices remain
+bundled. Source, patch and dependency pins are in `research/henge-source.json`.
+The new research launcher/control scripts use this repository's GPL option.
+
+The initial artifacts were separately built companion applications.
+WindowsiOS's own settings navigation was implemented independently using UTM
+as a design reference. The subsequent **UTM ARM Lab** target uses UTM's actual
+Apache-2.0 frontend with the Windows and Henge engines embedded in isolated
+frameworks. Its upstream-relative patches are
+`scripts/patches/utm-unified.patch` and `scripts/patches/henge-unified.patch`;
+the original source notices and bundled dependency licenses are retained.
+The Windows and Henge engines retain their existing GPL licensing, and the
+combined build includes the same OpenSSL 3/TPM linking notices described above.
+See [the unified source and build layout](docs/UNIFIED_UTM.md).

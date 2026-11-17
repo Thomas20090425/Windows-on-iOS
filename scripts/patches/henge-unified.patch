@@ -1,0 +1,1523 @@
+diff --git a/Makefile b/Makefile
+index a81af23..bbe08ca 100644
+--- a/Makefile
++++ b/Makefile
+@@ -189,7 +189,7 @@ $(B)/test_tl_app: tests/test_tl_app.m ios/Henge/Native/henge-tl-app.m ios/Henge/
+ 	  -lz -lbz2 -lcompression -o $@
+ # Sample Mac programs for the app's Mac apps screen, as a disk image (read by the same import path as anyone's).
+ $(B)/tl-samples.dmg: tests/tl/exit3.c tl/tests/hello.c tl/tests/fnd.m tl/tests/swifty.swift tl/tests/cxx.cpp tl/tests/fw.m tl/tests/fwapp.m | $(B)
+-	make -C tl build/hello build/fnd build/swifty build/cxx build/FW.app/Contents/MacOS/fwapp
++	env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET $(MAKE) -B -C tl build/hello build/fnd build/swifty build/cxx build/FW.app/Contents/MacOS/fwapp
+ 	rm -rf $(B)/tl-samples $@ && mkdir -p $(B)/tl-samples
+ 	cp tl/build/hello "$(B)/tl-samples/Hello (C)"
+ 	cp tl/build/fnd "$(B)/tl-samples/Foundation sample"
+diff --git a/devices/pvg_metal.m b/devices/pvg_metal.m
+index a2c95a7..284d50b 100644
+--- a/devices/pvg_metal.m
++++ b/devices/pvg_metal.m
+@@ -60,6 +60,86 @@ - (id)newComputePipelineDescriptorWithSerializedData:(dispatch_data_t)d deserial
+ 
+ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OBJ_LINEAR_TEXTURE = 8, OBJ_MAPPED_TEXTURE = 0xb };
+ 
++/* BEGIN LINEAR BACKING: also compiled by the focused Metal round-trip harness. */
++@interface HvLinearBacking : NSObject {
++@public
++    id<MTLBuffer> buffer;
++    NSUInteger row, width_bytes, height;
++}
++@end
++@implementation HvLinearBacking
++@end
++
++static HvLinearBacking *make_linear_backing(id<MTLDevice> device, NSUInteger bytes, NSUInteger height) {
++    if (!bytes || !height || bytes > NSUIntegerMax - 4095) return nil;
++    NSUInteger row = (bytes + 4095) & ~(NSUInteger)4095;
++    if (height > device.maxBufferLength / row) return nil;
++    HvLinearBacking *backing = [HvLinearBacking new];
++    backing->buffer = [device newBufferWithLength:row * height options:MTLResourceStorageModeShared];
++    if (!backing->buffer) return nil;
++    backing->row = row, backing->width_bytes = bytes, backing->height = height;
++    return backing;
++}
++
++/* Buffer copies have no linear-texture row alignment requirement. Byte-sized
++   layouts use a compute copy when Metal's buffer blit alignment does not fit. */
++static BOOL copy_linear_rows(id<MTLDevice> device, id<MTLCommandBuffer> cb,
++                             id<MTLBlitCommandEncoder> *blit, id<MTLBuffer> from, NSUInteger offset, NSUInteger row,
++                             HvLinearBacking *backing, BOOL to_guest) {
++    if (!from || !backing || offset > from.length || !row || backing->width_bytes > row ||
++        backing->width_bytes > from.length - offset ||
++        backing->height - 1 > (from.length - offset - backing->width_bytes) / row) return NO;
++    id<MTLBuffer> src = to_guest ? backing->buffer : from, dst = to_guest ? from : backing->buffer;
++    NSUInteger src_offset = to_guest ? 0 : offset, dst_offset = to_guest ? offset : 0;
++    NSUInteger src_row = to_guest ? backing->row : row, dst_row = to_guest ? row : backing->row;
++    BOOL word_aligned = !((src_offset | dst_offset | src_row | dst_row | backing->width_bytes) & 3);
++    if (word_aligned && (backing->height <= 64 || (src_row == dst_row && src_row == backing->width_bytes))) {
++        if (!*blit) *blit = [cb blitCommandEncoder];
++        if (src_row == dst_row && src_row == backing->width_bytes) {
++            [*blit copyFromBuffer:src sourceOffset:src_offset toBuffer:dst destinationOffset:dst_offset size:src_row * backing->height];
++            return YES;
++        }
++        for (NSUInteger y = 0; y < backing->height; y++)
++            [*blit copyFromBuffer:src sourceOffset:src_offset + y * src_row
++                        toBuffer:dst destinationOffset:dst_offset + y * dst_row size:backing->width_bytes];
++        return YES;
++    }
++    [*blit endEncoding];
++    *blit = nil;
++    static id<MTLDevice> pipeline_device;
++    static id<MTLComputePipelineState> pipeline;
++    id<MTLComputePipelineState> state;
++    @synchronized ([HvLinearBacking class]) {
++        if (pipeline_device != device) {
++            NSError *error = nil;
++            NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\n"
++                "kernel void copy_rows(device const uchar *s [[buffer(0)]], device uchar *d [[buffer(1)]], "
++                "constant ulong *p [[buffer(2)]], uint2 q [[thread_position_in_grid]]) { "
++                "ulong x=ulong(q.x)*16; if (x >= p[4] || q.y >= p[5]) return; "
++                "device const uchar *sr=s+p[0]+q.y*p[1]; device uchar *dr=d+p[2]+q.y*p[3]; "
++                "if (((p[0]|p[1]|p[2]|p[3]|p[4]) & 15)==0) "
++                "((device uint4 *)dr)[q.x]=((device const uint4 *)sr)[q.x]; "
++                "else for (uint i=0;i<16 && x+i<p[4];i++) dr[x+i]=sr[x+i]; }";
++            id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
++            pipeline = library ? [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"copy_rows"] error:&error] : nil;
++            if (!pipeline) { fprintf(stderr, "hengevm: pvg-metal: linear row copy pipeline: %s\n", error.localizedDescription.UTF8String); return NO; }
++            pipeline_device = device;
++        }
++        state = pipeline;
++    }
++    uint64_t layout[6] = {src_offset, src_row, dst_offset, dst_row, backing->width_bytes, backing->height};
++    id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
++    [encoder setComputePipelineState:state];
++    [encoder setBuffer:src offset:0 atIndex:0];
++    [encoder setBuffer:dst offset:0 atIndex:1];
++    [encoder setBytes:layout length:sizeof layout atIndex:2];
++    [encoder dispatchThreads:MTLSizeMake((backing->width_bytes + 15) / 16, backing->height, 1)
++      threadsPerThreadgroup:MTLSizeMake(MIN((NSUInteger)256, state.maxTotalThreadsPerThreadgroup), 1, 1)];
++    [encoder endEncoding];
++    return YES;
++}
++/* END LINEAR BACKING */
++
+ /* What is known about a made object, so a reused ref is noticed. */
+ @interface HvObject : NSObject {
+ @public
+@@ -111,6 +191,12 @@ write to one plane (a decoder refilling luma) does not wipe what the GPU drew in
+     HvObject *parent;
+     /* A multi-plane surface's key in the replay's planar table, while it counts as one of its users. */
+     NSString *planar_key;
++    /* A packed guest layout can need aligned host rows. All texture aliases
++       over the same guest bytes share this backing and commit writes to them. */
++    HvLinearBacking *linear;
++    NSData *linear_key;
++    id<MTLBuffer> linear_guest;
++    NSUInteger linear_offset, linear_row;
+ }
+ @end
+ 
+@@ -140,6 +226,7 @@ @interface HvReplay : NSObject {
+     NSMutableDictionary<NSString *, id> *planar;
+     NSMutableDictionary<NSString *, NSNumber *> *planar_uses; /* mappings using each: the entry goes with the last one */
+     NSMutableDictionary<NSString *, NSMutableData *> *planar_hashes; /* and what its planes held when last copied */
++    NSMapTable<NSData *, HvLinearBacking *> *linear_backings;
+     NSMutableSet<NSString *> *complaints;
+     uint64_t execs, draws, failed, heap_bytes, synced, remaps;
+     /* Work the GPU has not finished. Stamps are given back in the order they came: the
+@@ -238,10 +325,12 @@ static BOOL linear_texture_fits(id<MTLDevice> device, MTLTextureDescriptor *t, u
+     NSUInteger bpp = pixel_bytes(t.pixelFormat);
+     if (!bpp) return YES; /* not checked: as before */
+     NSUInteger align = [device minimumLinearTextureAlignmentForPixelFormat:t.pixelFormat];
+-    BOOL ok = row >= t.width * bpp && (!align || (row % align == 0 && offset % align == 0)) && offset + row * t.height <= length;
++    BOOL bounds = t.width <= UINT64_MAX / bpp && offset <= length && t.width * bpp <= length - offset &&
++        row >= t.width * bpp && row && t.height && t.height - 1 <= (length - offset - t.width * bpp) / row;
++    BOOL ok = bounds && (!align || (row % align == 0 && offset % align == 0));
+     if (!ok) {
+         static int told;
+-        if (told++ < 8) fprintf(stderr, "hengevm: pvg-metal: a %lux%lu format %lu texture can't sit on rows of %llu bytes at %llu in %lu: left empty\n",
++        if (told++ < 8) fprintf(stderr, "hengevm: pvg-metal: a %lux%lu format %lu texture needs aligned backing for rows of %llu bytes at %llu in %lu\n",
+                                 (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, row, offset, (unsigned long)length);
+     }
+     return ok;
+@@ -691,6 +780,62 @@ - (void)makeTexture:(HvObject *)o at:(uint64_t)at size:(uint32_t)size task:(uint
+     if (!o->object) [self complain:[NSString stringWithFormat:@"texture format %lu %lux%lu failed", (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height]];
+ }
+ 
++/* Physical page identities make mappings of one surface in different guest
++   processes share the same host pixels. A virtual mapping address does not. */
++static NSData *linear_storage_key(HvReplay *r, HvObject *owner, id<MTLBuffer> buffer,
++                                  NSUInteger offset, NSUInteger row, NSUInteger width, NSUInteger height) {
++    uint64_t layout[5] = {row, width, height, offset & 0x3fff, owner->mapped && owner->pages ? 1 : 2};
++    NSMutableData *key = [NSMutableData dataWithBytes:layout length:sizeof layout];
++    if (owner->mapped && owner->pages) {
++        NSUInteger last = offset + (height - 1) * row + width - 1;
++        for (NSUInteger p = offset >> 14; p <= last >> 14; p++) {
++            uint32_t page = owner->pages[p];
++            uint8_t *address = owner->vpage ? (page ? hv_pvg_lite_page(r->lite, page) : NULL) :
++                ((page & 1) ? hv_pvg_lite_phys(r->lite, (uint64_t)(page & ~1u) << 12, 0x4000) : NULL);
++            uintptr_t identity = address ? (uintptr_t)address : (uintptr_t)owner->mapped + (p << 14);
++            [key appendBytes:&identity length:sizeof identity];
++        }
++    } else {
++        uintptr_t identity = (uintptr_t)(__bridge void *)((id)buffer.heap ?: (id)buffer);
++        uint64_t position = offset + (buffer.heap ? buffer.heapOffset : 0);
++        [key appendBytes:&identity length:sizeof identity];
++        [key appendBytes:&position length:sizeof position];
++    }
++    return key;
++}
++
++- (void)bufferTexture:(HvObject *)o owner:(HvObject *)owner buffer:(id<MTLBuffer>)buffer
++           descriptor:(MTLTextureDescriptor *)t offset:(NSUInteger)offset row:(NSUInteger)row {
++    NSUInteger bpp = pixel_bytes(t.pixelFormat);
++    BOOL simple = t.textureType == MTLTextureType2D && t.depth == 1 && t.arrayLength == 1 &&
++        t.mipmapLevelCount == 1 && t.sampleCount == 1 && bpp;
++    BOOL bounds = simple && t.width <= NSUIntegerMax / bpp && offset <= buffer.length && row && t.height &&
++        t.width * bpp <= row && t.width * bpp <= buffer.length - offset &&
++        t.height - 1 <= (buffer.length - offset - t.width * bpp) / row;
++    if (!bounds) {
++        if (linear_texture_fits(device, t, offset, row, buffer.length))
++            o->object = [buffer newTextureWithDescriptor:t offset:offset bytesPerRow:row];
++        return;
++    }
++    o->linear_guest = buffer;
++    o->linear_offset = offset, o->linear_row = row;
++    o->linear_key = linear_storage_key(self, owner, buffer, offset, row, t.width * bpp, t.height);
++    if (!linear_backings) linear_backings = [NSMapTable strongToWeakObjectsMapTable];
++    HvLinearBacking *backing = [linear_backings objectForKey:o->linear_key];
++    if (!backing) {
++        backing = make_linear_backing(device, t.width * bpp, t.height);
++        if (!backing) return;
++        [linear_backings setObject:backing forKey:o->linear_key];
++    }
++    /* Use canonical storage from the first view, even when that particular
++       format could use the guest row directly. The guest can cache Metal
++       resource IDs, so a later alias must not replace an already exposed texture. */
++    MTLTextureDescriptor *description = [t copy];
++    description.resourceOptions = backing->buffer.resourceOptions;
++    o->object = [backing->buffer newTextureWithDescriptor:description offset:0 bytesPerRow:backing->row];
++    o->linear = backing;
++}
++
+ /* A texture over a buffer: {tag 9, size, ref, buffer ref, offset, bytes per row, description}. */
+ - (void)makeLinearTexture:(HvObject *)o at:(uint64_t)at size:(uint32_t)size task:(uint32_t)task {
+     struct __attribute__((packed)) { uint32_t tag, size, ref, buffer; uint64_t offset, row; uint8_t d[64]; } h;
+@@ -729,6 +874,7 @@ - (void)makeLinearTexture:(HvObject *)o at:(uint64_t)at size:(uint32_t)size task
+         if (!from) { [self complain:[NSString stringWithFormat:@"view of nothing (tag %u, ref %u)", h.tag, h.buffer]]; return; }
+         o->parent = parent;
+         o->surface = parent->surface;
++        o->follows = parent, o->follows_generation = parent->generation;
+         NSRange levels = NSMakeRange((NSUInteger)v.levels[0], (NSUInteger)v.levels[1]), slices = NSMakeRange((NSUInteger)v.slices[0], (NSUInteger)v.slices[1]);
+         if (h.tag == 7) o->object = [from newTextureViewWithPixelFormat:(MTLPixelFormat)v.format];
+         else if (h.tag == 8) o->object = [from newTextureViewWithPixelFormat:(MTLPixelFormat)v.format textureType:(MTLTextureType)v.type levels:levels slices:slices];
+@@ -754,7 +900,7 @@ - (void)makeLinearTexture:(HvObject *)o at:(uint64_t)at size:(uint32_t)size task
+     t.usage |= MTLTextureUsageShaderRead;
+     o->parent = b;
+     o->follows = b, o->follows_generation = b->generation;
+-    if (linear_texture_fits(device, t, h.offset, h.row, buffer.length)) o->object = [buffer newTextureWithDescriptor:t offset:h.offset bytesPerRow:h.row];
++    [self bufferTexture:o owner:b buffer:buffer descriptor:t offset:h.offset row:h.row];
+     if (!o->object) [self complain:[NSString stringWithFormat:@"linear texture format %lu row %llu failed", (unsigned long)t.pixelFormat, h.row]];
+ }
+ 
+@@ -967,6 +1113,9 @@ - (HvObject *)newSurface:(uint64_t)mapping {
+         return nil;
+     }
+     surface->mapped = (uint8_t *)base;
++    surface->pages = malloc(n * sizeof *surface->pages);
++    if (!surface->pages) return nil;
++    memcpy(surface->pages, pages, n * sizeof *surface->pages);
+     for (uint64_t i = 0; i < n; i++) {
+         if (!(pages[i] & 1)) continue;
+         uint8_t *src = hv_pvg_lite_phys(lite, (uint64_t)(pages[i] & ~1u) << 12, 0x4000);
+@@ -1095,12 +1244,10 @@ - (void)makeMappedTexture:(HvObject *)o at:(uint64_t)at task:(uint32_t)task {
+             o->object = [device newTextureWithDescriptor:t iosurface:surface->iosurface plane:plane];
+         }
+     }
+-    else if (linear_texture_fits(device, t, surface->first, surface->row, ((id<MTLBuffer>)surface->object).length))
+-        o->object = [(id<MTLBuffer>)surface->object newTextureWithDescriptor:t offset:surface->first bytesPerRow:surface->row];
++    else
++        [self bufferTexture:o owner:surface buffer:surface->object descriptor:t offset:surface->first row:surface->row];
+     if (!o->object) {
+         [self complain:[NSString stringWithFormat:@"surface %llu: format %lu row %llu not possible", h.mapping, (unsigned long)t.pixelFormat, surface->row]];
+-        t.storageMode = MTLStorageModePrivate;
+-        o->object = [device newTextureWithDescriptor:t]; /* something to bind: it stays empty */
+     }
+     if (!plane) mapped_textures[@(h.mapping)] = o->object;
+ }
+@@ -1136,6 +1283,7 @@ - (HvObject *)object:(uint32_t)ref task:(uint32_t)task {
+         if (o->follows->mapped) refresh_pages(self, task, o->follows);
+         if (o->follows->generation == o->follows_generation) return o;
+     }
++    if (o) o->generation++; /* derived views still retaining it must be rebuilt */
+     o = [HvObject new];
+     memcpy(o->entry, e, 12);
+     objs[@(ref)] = o;
+@@ -2085,6 +2233,11 @@ - (void)finishChannel:(uint32_t)ch stamp:(uint32_t)stamp {
+ }
+ 
+ /* Returns YES if the GPU's completion gives the stamp back. */
++static HvObject *linear_owner(HvObject *o) {
++    for (; o; o = o->parent) if (o->linear) return o;
++    return nil;
++}
++
+ - (BOOL)exec:(const uint32_t *)a length:(uint32_t)len channel:(uint32_t)ch stamp:(uint32_t)stamp {
+     uint32_t task = a[0], nres = a[1], nbuf = a[2];
+     if (12 + nres * 8ull + nbuf * 16ull > len) { /* never quietly: a lost job is a frame that never gets drawn */
+@@ -2099,6 +2252,8 @@ - (BOOL)exec:(const uint32_t *)a length:(uint32_t)len channel:(uint32_t)ch stamp
+     id<MTLCommandBuffer> cb = [queue commandBuffer];
+     id<MTLBlitCommandEncoder> blit = nil;
+     BOOL sync_after = NO;
++    /* Resolve resources and their view parents before encoding transfers. */
++    for (uint32_t i = 0; i < nres; i++) [self object:res[i * 2] task:task];
+     for (uint32_t i = 0; i < nres; i++) {
+         HvObject *o = [self object:res[i * 2] task:task];
+         if (!o) continue;
+@@ -2119,6 +2274,14 @@ - (BOOL)exec:(const uint32_t *)a length:(uint32_t)len channel:(uint32_t)ch stamp
+         }
+         if (res[i * 2 + 1] & 4) sync_after = YES;
+     }
++    NSMutableSet<HvLinearBacking *> *uploaded = [NSMutableSet new];
++    for (uint32_t i = 0; i < nres; i++) {
++        HvObject *o = linear_owner([self object:res[i * 2] task:task]);
++        if (!o || [uploaded containsObject:o->linear]) continue;
++        if (!copy_linear_rows(device, cb, &blit, o->linear_guest, o->linear_offset, o->linear_row, o->linear, NO))
++            [self complain:@"aligned texture upload failed"];
++        [uploaded addObject:o->linear];
++    }
+     [blit endEncoding];
+     /* Bit 1: this exec writes it, so the guest's copy is out of date from here on. Never
+        upload that over what the GPU drew: mostly zeros, which show as black boxes. */
+@@ -2193,6 +2356,20 @@ - (BOOL)exec:(const uint32_t *)a length:(uint32_t)len channel:(uint32_t)ch stamp
+         if (!more && e) { [e endEncoding]; e = nil; }
+     }
+     if (e) [e endEncoding];
++    /* Publish every GPU write in the original guest layout before returning
++       its completion stamp. Other processes can then map/read these pixels,
++       and the next queued upload cannot overwrite them with an old CPU copy. */
++    id<MTLBlitCommandEncoder> linear_back = nil;
++    NSMutableSet<HvLinearBacking *> *downloaded = [NSMutableSet new];
++    for (uint32_t i = 0; i < nres; i++) {
++        if (!(res[i * 2 + 1] & 2)) continue;
++        HvObject *o = linear_owner([self object:res[i * 2] task:task]);
++        if (!o || [downloaded containsObject:o->linear]) continue;
++        if (!copy_linear_rows(device, cb, &linear_back, o->linear_guest, o->linear_offset, o->linear_row, o->linear, YES))
++            [self complain:@"aligned texture writeback failed"];
++        [downloaded addObject:o->linear];
++    }
++    [linear_back endEncoding];
+     if (sync_after) { /* the guest wants these back as soon as this is done */
+         id<MTLBlitCommandEncoder> back = nil;
+         for (uint32_t i = 0; i < nres; i++) {
+diff --git a/ios/Embedded/HengeBackend.h b/ios/Embedded/HengeBackend.h
+new file mode 100644
+index 0000000..984bbef
+--- /dev/null
++++ b/ios/Embedded/HengeBackend.h
+@@ -0,0 +1,7 @@
++#import <Foundation/Foundation.h>
++#import <UIKit/UIKit.h>
++#include <HengeBackend/henge-ios-jit.h>
++#include <HengeBackend/henge-vm.h>
++#include <HengeBackend/henge-tl.h>
++#include <HengeBackend/HuskRPPairing.h>
++#include <HengeBackend/hvsparse.h>
+diff --git a/ios/Embedded/UTMHengeBackend.swift b/ios/Embedded/UTMHengeBackend.swift
+new file mode 100644
+index 0000000..6fa7c7e
+--- /dev/null
++++ b/ios/Embedded/UTMHengeBackend.swift
+@@ -0,0 +1,265 @@
++import AVFAudio
++import Foundation
++import SwiftUI
++import UIKit
++
++/// A VM-specific Henge session inside UTM. Native symbols stay in this dynamic framework.
++@MainActor
++@objc(UTMHengeBackend)
++public final class UTMHengeBackend: NSObject {
++    private static var initialized = false
++    private static var warming: Task<Void, Never>?
++    private static weak var active: EmbeddedMacModel?
++
++    /// Claim executable memory at launch while the Mac debugger can still answer Henge's exact BRKs.
++    /// This prepares the translator only; it never opens a guest disk or starts a VM.
++    @objc public static func prepareJIT() {
++        if !initialized {
++            initialized = true
++            HengeLog.start()
++            EngineTuning.apply()
++            JITBootstrap.noteLaunchState()
++            JITBootstrap.installTrapGuard()
++            try? AVAudioSession.sharedInstance().setCategory(.playback, options: [.mixWithOthers])
++            HengeLog.log("utm", "embedded macOS engine prepared; no guest started")
++        }
++        guard warming == nil, !JITBootstrap.ready else { return }
++        warming = Task { @MainActor in
++            defer { warming = nil }
++            // A launch-stopped process may not yet be marked debugged when the view first appears.
++            for _ in 0..<600 {
++                if Task.isCancelled || JITBootstrap.ready { return }
++                if JITBootstrap.debuggedFlag || JITBootstrap.canGrantOwnJIT {
++                    if JITBootstrap.prewarm() { return }
++                }
++                try? await Task.sleep(nanoseconds: 200_000_000)
++            }
++            HengeLog.log("utm", "still waiting for a debugger that can provide the JIT region")
++        }
++    }
++
++    @objc public static func makeViewController(packageURL: URL, configuration: NSDictionary,
++                                                stateChanged: @escaping (String, String?) -> Void) -> UIViewController {
++        prepareJIT()
++        let model = EmbeddedMacModel(package: packageURL, configuration: configuration, callback: stateChanged)
++        active = model
++        return UIHostingController(rootView: EmbeddedMacView(model: model))
++    }
++
++    @objc public static func requestStop(force: Bool) {
++        let state = henge_vm_state()
++        if state == 0 || state == 2 {
++            if Installer.shared.busy, Installer.shared.cancelBeforeRestore() { return }
++            active?.closed = true
++            active?.waitForStop()
++            return
++        }
++        if state == 3 { active?.waitForStop(); return }
++        guard state == 1 || state == 4 else { return }
++        if force {
++            henge_vm_stop()
++            active?.waitForStop()
++        } else {
++            // macOS owns the shutdown: a power key asks it to show its normal shutdown dialog.
++            henge_vm_key(116, 1)
++            henge_vm_key(116, 0)
++        }
++    }
++}
++
++@MainActor
++private final class EmbeddedMacModel: ObservableObject {
++    let configuration: NSDictionary
++    let folder: URL
++    let callback: (String, String?) -> Void
++    @Published var mac: VirtualMac?
++    @Published var error: String?
++    @Published var jitReady = false
++    @Published var releaseID = MacOSRelease.recommended.id
++    @Published var closed = false
++    private var nativeHasRun = false
++    private var lastEvent: String?
++    private var nativeWatcher: Task<Void, Never>?
++
++    init(package: URL, configuration: NSDictionary, callback: @escaping (String, String?) -> Void) {
++        self.configuration = configuration
++        self.callback = callback
++        self.folder = package.appendingPathComponent("Data/Henge", isDirectory: true)
++        loadExisting()
++        nativeWatcher = Task { @MainActor [weak self] in
++            while !Task.isCancelled {
++                guard self != nil else { return }
++                if self?.nativeHasRun == true, henge_vm_state() == 2 {
++                    self?.closed = true
++                    let failure = henge_vm_exit_outcome() == Int32(HENGE_VM_OUTCOME_ERROR.rawValue)
++                    self?.changed(failure ? "error" : "stopped", String(cString: henge_vm_exit_reason()))
++                    return
++                }
++                try? await Task.sleep(nanoseconds: 250_000_000)
++            }
++        }
++    }
++
++    deinit { nativeWatcher?.cancel() }
++
++    var name: String { configuration["name"] as? String ?? "Mac" }
++    func number(_ key: String, _ fallback: Int) -> Int { (configuration[key] as? NSNumber)?.intValue ?? fallback }
++    var localIPSW: URL? {
++        guard let path = configuration["installationMediaPath"] as? String, !path.isEmpty else { return nil }
++        return URL(fileURLWithPath: path)
++    }
++
++    func changed(_ state: String, _ message: String?) {
++        if state == "started" { nativeHasRun = true }
++        if state == "stopped" { closed = true }
++        guard state != lastEvent else { return }
++        lastEvent = state
++        callback(state, message)
++    }
++
++    func waitForStop(message: String? = nil, failure: Bool = false) {
++        Task { @MainActor in
++            // henge_vm_stop requests a stop; state 2 means the CPU threads and VM are actually released.
++            while henge_vm_state() == 3 { try? await Task.sleep(nanoseconds: 100_000_000) }
++            if henge_vm_state() == 2 || henge_vm_state() == 0 { changed(failure ? "error" : "stopped", message) }
++        }
++    }
++
++    func failedInstallation(_ text: String) {
++        if henge_vm_state() == 1 || henge_vm_state() == 4 { henge_vm_stop() }
++        waitForStop(message: text, failure: true)
++    }
++
++    func loadExisting() {
++        let fm = FileManager.default
++        let metadata = folder.appendingPathComponent("machine.json")
++        guard fm.fileExists(atPath: metadata.path) else {
++            if fm.fileExists(atPath: folder.appendingPathComponent("disk.img").path) {
++                error = "This Mac is missing machine.json. Its existing disk has been preserved."
++            }
++            return
++        }
++        do {
++            let object = try JSONSerialization.jsonObject(with: Data(contentsOf: metadata))
++            guard let info = object as? [String: Any], let ecid = (info["ecid"] as? NSNumber)?.uint64Value else {
++                throw embeddedMessage("This Mac's identity cannot be read. Its files have been preserved.")
++            }
++            for file in ["disk.img", "auxiliary.bin", "AVPBooter.vmapple2.bin"] {
++                guard fm.fileExists(atPath: folder.appendingPathComponent(file).path) else {
++                    throw embeddedMessage("This Mac is missing \(file). Its existing files have been preserved.")
++                }
++            }
++            var guest = VirtualMac(id: UUID(uuidString: configuration["uuid"] as? String ?? "") ?? UUID(),
++                                   name: name, ecid: ecid, seed: (info["seed"] as? NSNumber)?.uint64Value ?? 0,
++                                   ramMB: min(max(number("memoryMiB", (info["ramMB"] as? NSNumber)?.intValue ?? 4096), 1024), 262144),
++                                   diskBytes: Int64(min(max(number("diskSizeGiB", 64), 32), 2048)) << 30)
++            guest.storagePath = folder.path
++            guest.osName = try? String(contentsOf: folder.appendingPathComponent("installed"), encoding: .utf8)
++            guest.screenWidth = min(max(number("displayWidth", 1920), 640), 7680)
++            guest.screenHeight = min(max(number("displayHeight", 1080), 480), 4320)
++            guest.retina = false
++            mac = guest
++        } catch { self.error = error.localizedDescription }
++    }
++
++    func configure() {
++        UserDefaults.standard.set(min(max(number("cpuCount", 4), 1), 8), forKey: "henge.cpus")
++        if (configuration["networkEnabled"] as? NSNumber)?.boolValue == false { setenv("HENGE_NO_NET", "1", 1) }
++        else { unsetenv("HENGE_NO_NET") }
++        if (configuration["audioEnabled"] as? NSNumber)?.boolValue == false { setenv("HENGE_NO_SOUND", "1", 1) }
++        else { unsetenv("HENGE_NO_SOUND") }
++    }
++
++    func install() {
++        guard let release = MacOSRelease.all.first(where: { $0.id == releaseID }), JITBootstrap.ready else { return }
++        configure()
++        do { try FileManager.default.createDirectory(at: folder.deletingLastPathComponent(), withIntermediateDirectories: true) }
++        catch { self.error = error.localizedDescription; return }
++        changed("starting", "Installing macOS")
++        Installer.shared.start(release, name: name, ramMB: min(max(number("memoryMiB", 4096), 1024), 262144),
++                               cpus: min(max(number("cpuCount", 4), 1), 8), keepImage: true,
++                               targetDirectory: folder, localIPSW: localIPSW, diskSizeGiB: number("diskSizeGiB", 64))
++    }
++}
++
++@MainActor
++private struct EmbeddedMacView: View {
++    @ObservedObject var model: EmbeddedMacModel
++    @ObservedObject private var installer = Installer.shared
++
++    var body: some View {
++        Group {
++            if let error = model.error {
++                VStack(spacing: 16) {
++                    Image(systemName: "exclamationmark.triangle").font(.largeTitle)
++                    Text(model.name).font(.title2)
++                    Text(error).multilineTextAlignment(.center)
++                }.padding()
++            } else if let mac = model.mac, model.jitReady, !model.closed {
++                SessionView(mac: mac, engineStateChanged: model.changed) {
++                    model.closed = true
++                    model.waitForStop()
++                }.environment(\.colorScheme, .dark)
++            } else {
++                installOrWait.padding()
++            }
++        }
++        .task {
++            model.configure()
++            UTMHengeBackend.prepareJIT()
++            if let error = model.error { model.changed("error", error); return }
++            while !Task.isCancelled {
++                model.jitReady = JITBootstrap.ready
++                if model.jitReady { return }
++                try? await Task.sleep(nanoseconds: 200_000_000)
++            }
++        }
++        .onChange(of: installer.phase) { phase in
++            if case .failed(let text) = phase { model.failedInstallation(text) }
++            if case .done(let text) = phase { model.waitForStop(message: text) }
++        }
++    }
++
++    @ViewBuilder private var installOrWait: some View {
++        VStack(spacing: 20) {
++            Image(systemName: "desktopcomputer").font(.system(size: 44))
++            Text(model.name).font(.title2)
++            if model.closed {
++                Text("This Mac has stopped. Close and reopen UTM ARM Lab before starting it again.")
++            } else if !model.jitReady {
++                ProgressView()
++                Text("Waiting for Mac JIT").font(.headline)
++                Text("Connect this iPad to the Mac and run the unified app's JIT launcher. This Mac starts here when JIT is ready.")
++                    .multilineTextAlignment(.center).foregroundStyle(.secondary)
++            } else {
++                switch installer.phase {
++                case .done(let text), .failed(let text):
++                    Text(text).multilineTextAlignment(.center)
++                case .idle:
++                    Text("Install macOS on this Mac's new disk.")
++                    if let image = model.localIPSW {
++                        Label(image.lastPathComponent, systemImage: "externaldrive")
++                    } else {
++                        Picker("macOS", selection: $model.releaseID) {
++                            ForEach(MacOSRelease.all) { Text($0.name).tag($0.id) }
++                        }.pickerStyle(.menu)
++                    }
++                    Button("Install macOS") { model.install() }.buttonStyle(.borderedProminent)
++                case .checking, .preparing:
++                    ProgressView("Preparing this Mac…")
++                case .downloading:
++                    ProgressView(value: Double(installer.received), total: max(Double(installer.expected), 1))
++                    Text("Downloading macOS: \(ByteText.string(UInt64(max(installer.received, 0))))")
++                case .installing:
++                    ProgressView(value: installer.stepProgress)
++                    Text(Installer.stepName(installer.step))
++                    Text("Keep this app open until the installation finishes.").foregroundStyle(.secondary)
++                }
++            }
++        }.frame(maxWidth: 540)
++    }
++}
++
++private func embeddedMessage(_ text: String) -> NSError {
++    NSError(domain: "HengeBackend", code: 1, userInfo: [NSLocalizedDescriptionKey: text])
++}
+diff --git a/ios/Embedded/exports.txt b/ios/Embedded/exports.txt
+new file mode 100644
+index 0000000..f59a23b
+--- /dev/null
++++ b/ios/Embedded/exports.txt
+@@ -0,0 +1,7 @@
++_OBJC_CLASS_$_UTMHengeBackend
++_OBJC_METACLASS_$_UTMHengeBackend
++_$s12HengeBackend*
++_henge_brk_probe
++_henge_brk_get_jit_mapping
++_henge_brk_jit_detach
++_henge_ios_jit_install_trap_handler
+diff --git a/ios/Henge/Autopilot.swift b/ios/Henge/Autopilot.swift
+index 6a0a9cc..286aa79 100644
+--- a/ios/Henge/Autopilot.swift
++++ b/ios/Henge/Autopilot.swift
+@@ -36,12 +36,13 @@ enum Autopilot {
+         return (try? FileManager.default.moveItem(at: once, to: plan)) != nil
+     }()
+ 
+-    @MainActor static func run(start: @escaping (VirtualMac) -> Void) async {
++    @MainActor static func run(start: @escaping (VirtualMac) -> Void, showInstaller: @escaping () -> Void = {}) async {
+         guard enabled else { return }
+         let url = docs.appendingPathComponent("henge-autopilot.txt")
+         HengeLog.log("autopilot", "following \(url.lastPathComponent)")
+         var done = 0 // lines already run
+         while !Task.isCancelled {
++            writeStatus()
+             let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+             var lines = text.components(separatedBy: "\n")
+             lines.removeLast() // only whole lines: the last piece has no newline yet
+@@ -52,16 +53,64 @@ enum Autopilot {
+                 if line.isEmpty || line.hasPrefix("#") { continue }
+                 /* What is typed may be a password: the log gets its length only. */
+                 HengeLog.log("autopilot", line.hasPrefix("type ") ? "type (\(line.count - 5) characters)" : line)
+-                await perform(line, start: start)
++                await perform(line, start: start, showInstaller: showInstaller)
+             }
+             try? await Task.sleep(nanoseconds: 500_000_000)
+         }
+     }
+ 
+-    @MainActor private static func perform(_ line: String, start: (VirtualMac) -> Void) async {
++    @MainActor private static func writeStatus() {
++        let installer = Installer.shared
++        var phase = "idle", message = ""
++        switch installer.phase {
++        case .idle: break
++        case .checking: phase = "checking"
++        case .downloading: phase = "downloading"
++        case .preparing: phase = "preparing"
++        case .installing: phase = "installing"
++        case .done(let text): phase = "done"; message = text
++        case .failed(let text): phase = "failed"; message = text
++        }
++        let state: [String: Any] = [
++            "timestamp": ISO8601DateFormatter().string(from: Date()),
++            "bundle_id": Bundle.main.bundleIdentifier ?? "unknown",
++            "jit_ready": JITBootstrap.ready, "installer_phase": phase,
++            "installer_message": message, "received_bytes": installer.received,
++            "expected_bytes": installer.expected, "restore_step": installer.step,
++            "restore_progress": installer.stepProgress, "vm_state": henge_vm_state(),
++            "vm_exit_reason": String(cString: henge_vm_exit_reason()),
++            "machines": Machines.shared.all.map { ["name": $0.name, "id": $0.id.uuidString, "ram_mb": $0.ramMB] as [String: Any] }
++        ]
++        if let data = try? JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys]) {
++            try? data.write(to: docs.appendingPathComponent("henge-research-status.json"), options: .atomic)
++        }
++    }
++
++    @MainActor private static func perform(_ line: String, start: (VirtualMac) -> Void, showInstaller: () -> Void) async {
+         let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+         let arg = parts.count > 1 ? parts[1] : ""
+         switch parts[0] {
++        case "install": // install BUILD RAM_MIB NAME; a NEW virtual Mac only, never the physical iPad.
++            let fields = arg.split(separator: " ", maxSplits: 2).map(String.init)
++            guard fields.count == 3,
++                  let release = MacOSRelease.all.first(where: { $0.id == fields[0] }),
++                  let ram = Int(fields[1]), [4096, 6144, 8192].contains(ram),
++                  !fields[2].isEmpty else {
++                HengeLog.log("autopilot", "install wants a known build, 4096/6144/8192 MiB and a name")
++                return
++            }
++            guard !Installer.shared.busy else { return }
++            for _ in 0..<240 where !JITBootstrap.ready {
++                writeStatus()
++                try? await Task.sleep(nanoseconds: 500_000_000)
++            }
++            guard JITBootstrap.ready else { HengeLog.log("autopilot", "JIT is not ready; not restoring"); return }
++            guard !Machines.shared.all.contains(where: { $0.name == fields[2] }) else {
++                HengeLog.log("autopilot", "a Mac with that name already exists; not restoring again")
++                return
++            }
++            showInstaller()
++            Installer.shared.start(release, name: fields[2], ramMB: ram, cpus: 4, keepImage: true)
+         case "mac":
+             for _ in 0..<240 where !JITBootstrap.ready { try? await Task.sleep(nanoseconds: 500_000_000) }
+             guard JITBootstrap.ready else { HengeLog.log("autopilot", "JIT is not on; not starting a Mac"); return }
+@@ -140,7 +189,7 @@ enum Autopilot {
+             let got = henge_vm_balloon(Int(arg) ?? -1)
+             HengeLog.log("autopilot", got < 0 ? "no balloon (set HV_BALLOON in henge-env.txt)" : "balloon: the Mac has handed over \(got) MB")
+         case "tlsamples": // the sample Mac programs into Documents/Mac Apps (Mac apps without macOS)
+-            guard let dmg = Bundle.main.url(forResource: "tl-samples", withExtension: "dmg") else { HengeLog.log("autopilot", "no samples in this build"); break }
++            guard let dmg = HengeResources.bundle.url(forResource: "tl-samples", withExtension: "dmg") else { HengeLog.log("autopilot", "no samples in this build"); break }
+             try? FileManager.default.createDirectory(at: MacAppsStore.folder, withIntermediateDirectories: true)
+             var err = [CChar](repeating: 0, count: 512)
+             let n = henge_tl_import_dmg(dmg.path, MacAppsStore.folder.path, &err, err.count)
+diff --git a/ios/Henge/Hardware.swift b/ios/Henge/Hardware.swift
+index bf7e47e..676f635 100644
+--- a/ios/Henge/Hardware.swift
++++ b/ios/Henge/Hardware.swift
+@@ -171,13 +171,17 @@ final class HardwareMouse {
+     private var mice: [GCMouse] = []
+     private var buttons = PhysicalMouseButtons(swapsRightAndMiddle: false)
+     private var buttonsLogged = 0
+-    private var restX: Float = 0, restY: Float = 0
+     private var speed: Float = 1
+     private var reverse = false
+     private var scrollsLogged = 0 // the first few, to see what a device's raw values look like
+-    private var lastScrollFirst: Float = 0, lastScrollSecond: Float = 0
++    private final class MouseState {
++        var motion = PhysicalMouseMotion()
++        let trackpad: Bool
++        init(trackpad: Bool) { self.trackpad = trackpad }
++    }
+ 
+     func start() {
++        stop()
+         let defaults = UserDefaults.standard
+         speed = defaults.object(forKey: Self.speedKey) == nil ? 1 : Float(defaults.double(forKey: Self.speedKey))
+         reverse = defaults.bool(forKey: Self.reverseKey)
+@@ -186,8 +190,7 @@ final class HardwareMouse {
+         buttons = PhysicalMouseButtons(swapsRightAndMiddle: swapButtons)
+         buttonsLogged = 0
+         HengeLog.log("input", "physical mouse: swap right/middle \(swapButtons ? "on" : "off")")
+-        lastScrollFirst = 0
+-        lastScrollSecond = 0
++        scrollsLogged = 0
+         GCMouse.mice().forEach(attach)
+         observers.append(NotificationCenter.default.addObserver(forName: .GCMouseDidConnect, object: nil, queue: .main) { [weak self] note in
+             if let mouse = note.object as? GCMouse { self?.attach(mouse) }
+@@ -218,6 +221,8 @@ final class HardwareMouse {
+             input.rightButton?.pressedChangedHandler = nil
+             input.middleButton?.pressedChangedHandler = nil
+             input.scroll.valueChangedHandler = nil
++            input.scroll.xAxis.valueChangedHandler = nil
++            input.scroll.yAxis.valueChangedHandler = nil
+         }
+         mice.removeAll()
+     }
+@@ -230,22 +235,26 @@ final class HardwareMouse {
+         guard let input = mouse.mouseInput, !mice.contains(where: { $0 === mouse }) else { return }
+         mice.append(mouse)
+         HengeLog.log("input", "mouse: \(mouse.vendorName ?? "?"), right button \(input.rightButton != nil), middle \(input.middleButton != nil)")
+-        input.mouseMovedHandler = { [weak self] _, dx, dy in self?.moved(dx, dy) }
++        let vendor = (mouse.vendorName ?? "").lowercased()
++        let state = MouseState(trackpad: vendor.contains("trackpad") || vendor.contains("magic keyboard"))
++        input.mouseMovedHandler = { [weak self] _, dx, dy in self?.moved(dx, dy, state: state) }
+         input.leftButton.pressedChangedHandler = { [weak self] _, _, pressed in self?.button(0, pressed) }
+         input.rightButton?.pressedChangedHandler = { [weak self] _, _, pressed in self?.button(1, pressed) }
+         input.middleButton?.pressedChangedHandler = { [weak self] _, _, pressed in self?.button(2, pressed) }
+-        input.scroll.valueChangedHandler = { [weak self] _, first, second in self?.scrolled(first, second) }
++        // Independent callbacks avoid replaying the other axis's stale value.
++        // These preserve the axis mapping observed on Magic Keyboard in the device log.
++        input.scroll.xAxis.valueChangedHandler = { [weak self] _, value in
++            self?.scrolled(-value, horizontal: false, state: state)
++        }
++        input.scroll.yAxis.valueChangedHandler = { [weak self] _, value in
++            self?.scrolled(value, horizontal: true, state: state)
++        }
+     }
+ 
+-    /// GameController's Y runs upward. What doesn't make a whole step yet waits for the next move.
+-    private func moved(_ dx: Float, _ dy: Float) {
+-        restX += dx * speed
+-        restY -= dy * speed
+-        let x = restX.rounded(), y = restY.rounded()
+-        guard x != 0 || y != 0 else { return }
+-        restX -= x
+-        restY -= y
+-        henge_vm_mouse_move(Int32(x), Int32(y))
++    private func moved(_ dx: Float, _ dy: Float, state: MouseState) {
++        for (x, y) in state.motion.move(dx: dx, dy: dy, speed: speed) {
++            henge_vm_mouse_move(x, y)
++        }
+     }
+ 
+     private func button(_ physicalButton: Int32, _ pressed: Bool) {
+@@ -258,38 +267,17 @@ final class HardwareMouse {
+         if !pressed { StickyKeys.shared.releaseAll() }
+     }
+ 
+-    /// GameController puts vertical motion on the first axis and horizontal on the second.
+-    /// macOS accelerates wheel units roughly quadratically, so use a tunable square root
+-    /// and cap each event to keep a small pad gesture from jumping across a page.
+-    private func scrolled(_ first: Float, _ second: Float) {
+-        // GameController reports both axis states when either one changes. On a
+-        // Magic Keyboard it calls us twice per movement, with one stale axis in
+-        // each call; sending both values doubles the scroll and adds sideways drift.
+-        let verticalChanged = first != lastScrollFirst
+-        let horizontalChanged = second != lastScrollSecond
+-        lastScrollFirst = first
+-        lastScrollSecond = second
+-        let mostlyVertical = abs(first) > 2 * abs(second)
+-        let mostlyHorizontal = abs(second) > 2 * abs(first)
+-        let verticalRaw = verticalChanged && !mostlyHorizontal ? -first : 0
+-        let horizontalRaw = horizontalChanged && !mostlyVertical ? second : 0
++    private func scrolled(_ value: Float, horizontal: Bool, state: MouseState) {
+         let defaults = UserDefaults.standard
+         let configured = defaults.object(forKey: Self.scrollSpeedKey) == nil
+             ? 0.3 : defaults.double(forKey: Self.scrollSpeedKey)
+         let scale = Float(configured.isFinite ? min(max(configured, 0.1), 1.5) : 0.3)
+-        let way: Int32 = reverse ? -1 : 1
+-        let horizontal = way * Self.wheelUnits(horizontalRaw, scale: scale)
+-        let vertical = way * Self.wheelUnits(verticalRaw, scale: scale)
++        let units = state.motion.scroll(value, horizontal: horizontal, trackpad: state.trackpad, scale: scale)
++        let signed = reverse ? -units : units
+         if scrollsLogged < 24 {
+             scrollsLogged += 1
+-            HengeLog.log("input", "scroll raw: \(first), \(second); units: \(horizontal), \(vertical)")
++            HengeLog.log("input", "scroll \(horizontal ? "horizontal" : "vertical"): raw \(value), units \(signed), trackpad \(state.trackpad)")
+         }
+-        if horizontal != 0 || vertical != 0 { henge_vm_mouse_scroll(horizontal, vertical) }
+-    }
+-
+-    private static func wheelUnits(_ value: Float, scale: Float) -> Int32 {
+-        guard value.isFinite else { return 0 }
+-        let units = Int32(min(32, (22 * scale * abs(value).squareRoot()).rounded()))
+-        return value < 0 ? -units : units
++        if signed != 0 { henge_vm_mouse_scroll(horizontal ? signed : 0, horizontal ? 0 : signed) }
+     }
+ }
+diff --git a/ios/Henge/HengeApp.swift b/ios/Henge/HengeApp.swift
+index 6ba71f1..dd68024 100644
+--- a/ios/Henge/HengeApp.swift
++++ b/ios/Henge/HengeApp.swift
+@@ -1,6 +1,7 @@
+ import SwiftUI
+ import AVFAudio
+ 
++#if !HENGE_EMBEDDED
+ @main
+ struct HengeApp: App {
+     /// Answers for external display scenes before iOS 27 (LegacyExternalDisplay.swift).
+@@ -35,6 +36,8 @@ struct HengeApp: App {
+     }
+ }
+ 
++#endif
++
+ struct RootView: View {
+     enum Tab: Hashable { case macs, install, settings }
+ 
+@@ -91,12 +94,12 @@ struct RootView: View {
+         }
+         .onChange(of: jit.attachGeneration) { _ in JITBootstrap.prewarm() } // the built-in helper attached
+         .task { // testing only: HENGE_AUTOPILOT
+-            await Autopilot.run { mac in
++            await Autopilot.run(start: { mac in
+                 // A session still on screen (its Mac stopped) is closed first: the same value again would start nothing.
+                 guard running != nil else { running = mac; return }
+                 running = nil
+                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { running = mac }
+-            }
++            }, showInstaller: { tab = .install })
+         }
+     }
+ }
+diff --git a/ios/Henge/HengeResources.swift b/ios/Henge/HengeResources.swift
+new file mode 100644
+index 0000000..d54adc7
+--- /dev/null
++++ b/ios/Henge/HengeResources.swift
+@@ -0,0 +1,14 @@
++import Foundation
++
++private final class HengeResourceAnchor: NSObject {}
++
++/// Resources are in the engine framework when embedded, and the main bundle in the standalone app.
++enum HengeResources {
++    static let bundle: Bundle = {
++#if HENGE_EMBEDDED
++        return Bundle(for: HengeResourceAnchor.self)
++#else
++        return .main
++#endif
++    }()
++}
+diff --git a/ios/Henge/Installer.swift b/ios/Henge/Installer.swift
+index 9be3a5a..637a60d 100644
+--- a/ios/Henge/Installer.swift
++++ b/ios/Henge/Installer.swift
+@@ -65,6 +65,7 @@ final class Installer: NSObject, ObservableObject {
+     /* Background time, so a moment out of the foreground (a notification, iPhone Mirroring reconnecting)
+        does not suspend the restore at once; iOS gives about 30 s. */
+     private var grace = UIBackgroundTaskIdentifier.invalid
++    private var runningTask: Task<Void, Never>?
+ 
+     var busy: Bool {
+         switch phase {
+@@ -102,13 +103,21 @@ final class Installer: NSObject, ObservableObject {
+ 
+     func reset() { if !busy { phase = .idle } }
+ 
++    /// Downloads can be cancelled safely before a restore VM owns the new disk.
++    func cancelBeforeRestore() -> Bool {
++        guard phase == .checking || phase == .downloading || phase == .preparing else { return false }
++        runningTask?.cancel()
++        return true
++    }
++
+     private func endGrace() {
+         guard grace != .invalid else { return }
+         UIApplication.shared.endBackgroundTask(grace)
+         grace = .invalid
+     }
+ 
+-    func start(_ release: MacOSRelease, name: String, ramMB: Int, cpus: Int, keepImage: Bool) {
++    func start(_ release: MacOSRelease, name: String, ramMB: Int, cpus: Int, keepImage: Bool,
++               targetDirectory: URL? = nil, localIPSW: URL? = nil, diskSizeGiB: Int = 64) {
+         guard !busy else { return }
+         phase = .checking
+         machineName = name
+@@ -116,27 +125,36 @@ final class Installer: NSObject, ObservableObject {
+         grace = UIApplication.shared.beginBackgroundTask(withName: "Henge install") {
+             MainActor.assumeIsolated { Installer.shared.endGrace() }
+         }
+-        Task {
+-            defer { UIApplication.shared.isIdleTimerDisabled = false; endGrace() }
++        runningTask = Task {
++            defer { runningTask = nil; UIApplication.shared.isIdleTimerDisabled = false; endGrace() }
+             var made: VirtualMac?
+             do {
+-                try checkSpace(release)
++                if localIPSW == nil { try checkSpace(release) }
+                 let rom = try await BootROM.file() // before the long download, so a problem shows up at once
+                 HengeLog.log("install", "boot ROM ready")
+-                let ipsw = try await download(release)
++                let ipsw: URL
++                if let localIPSW {
++                    guard FileManager.default.isReadableFile(atPath: localIPSW.path), localIPSW.pathExtension.lowercased() == "ipsw" else {
++                        throw message("The selected restore image is not a readable IPSW file.")
++                    }
++                    ipsw = localIPSW
++                } else { ipsw = try await download(release) }
++                try Task.checkCancellation()
+                 phase = .preparing
+-                var mac = try prepare(name: name, ramMB: ramMB, rom: rom)
++                var mac = try prepare(name: name, ramMB: ramMB, rom: rom, targetDirectory: targetDirectory, diskSizeGiB: diskSizeGiB)
+                 mac.osName = release.name
+                 made = mac
+                 phase = .installing
+                 try await install(mac, ipsw: ipsw, cpus: cpus)
+-                if !keepImage { try? FileManager.default.removeItem(at: ipsw) }
++                if !keepImage && localIPSW == nil { try? FileManager.default.removeItem(at: ipsw) }
+                 HengeLog.log("install", "\(name): installed \(release.name)")
+-                phase = .done("\(release.name) is installed on \(name). Quit Henge (swipe it away) and open it again, then tap Start.")
++                phase = .done(targetDirectory == nil
++                    ? "\(release.name) is installed on \(name). Close this app completely and reopen it, then start this Mac."
++                    : "macOS is installed. Close and reopen UTM ARM Lab, prepare macOS JIT, then start this machine.")
+             } catch {
+                 HengeLog.log("install", "failed: \(error.localizedDescription)")
+                 // A half-installed Mac is no use, and its disk can be many gigabytes. The download stays.
+-                if let made, henge_vm_state() != 1 { try? FileManager.default.removeItem(at: made.directory) }
++                if let made, made.storagePath == nil, henge_vm_state() != 1 { try? FileManager.default.removeItem(at: made.directory) }
+                 phase = .failed(error.localizedDescription)
+             }
+         }
+@@ -193,24 +211,30 @@ final class Installer: NSObject, ObservableObject {
+ 
+     // MARK: The new machine
+ 
+-    private func prepare(name: String, ramMB: Int, rom: URL) throws -> VirtualMac {
++    private func prepare(name: String, ramMB: Int, rom: URL, targetDirectory: URL?, diskSizeGiB: Int) throws -> VirtualMac {
+         // A new machine identity, as VZMacMachineIdentifier makes one: a random ECID.
+         let ecid = UInt64.random(in: 1 << 40 ..< 1 << 62)
+-        var mac = VirtualMac(name: name, ecid: ecid, seed: 0, ramMB: ramMB, diskBytes: 64 << 30)
++        let diskBytes = Int64(min(max(diskSizeGiB, 32), 2048)) << 30
++        var mac = VirtualMac(name: name, ecid: ecid, seed: 0, ramMB: ramMB, diskBytes: diskBytes)
++        mac.storagePath = targetDirectory?.path
+         (mac.screenWidth, mac.screenHeight) = Device.fittingScreen
+         let fm = FileManager.default
++        if targetDirectory != nil, fm.fileExists(atPath: mac.directory.path),
++           !(try fm.contentsOfDirectory(atPath: mac.directory.path)).isEmpty {
++            throw message("This Mac already contains files. Restore only into a new, empty Mac.")
++        }
+         try fm.createDirectory(at: mac.directory, withIntermediateDirectories: true)
+         Machines.excludeFromBackup(Machines.root)
+         try? fm.removeItem(at: mac.rom)
+         try fm.copyItem(at: rom, to: mac.rom)
+         guard fm.createFile(atPath: mac.disk.path, contents: nil) else { throw message("Cannot create the disk.") }
+         let h = try FileHandle(forWritingTo: mac.disk)
+-        try h.truncate(atOffset: UInt64(64) << 30) // sparse: blocks are only used as macOS writes them
++        try h.truncate(atOffset: UInt64(diskBytes)) // sparse: blocks are only used as macOS writes them
+         try h.close()
+         guard henge_make_aux(mac.aux.path) == 0 else { throw message("Cannot create the auxiliary storage.") }
+         let info: [String: Any] = ["name": name, "ecid": ecid, "seed": 0, "ramMB": ramMB]
+         try JSONSerialization.data(withJSONObject: info).write(to: mac.directory.appendingPathComponent("machine.json"))
+-        mac.diskBytes = 64 << 30
++        mac.diskBytes = diskBytes
+         HengeLog.log("install", "new machine \(name): ECID \(ecid), 64 GB disk")
+         return mac
+     }
+@@ -250,7 +274,7 @@ final class Installer: NSObject, ObservableObject {
+         // In the list before anything else: stopping the restore system can take a while, and if Henge is
+         // stopped meanwhile (the phone locked) a finished Mac must not be left on the disk unlisted.
+         try? (mac.osName ?? "").write(to: mac.directory.appendingPathComponent(Machines.installedMarker), atomically: true, encoding: .utf8)
+-        Machines.shared.add(mac)
++        if mac.storagePath == nil { Machines.shared.add(mac) }
+         HengeLog.log("install", "\(mac.name): restore finished, added to the Macs")
+         if henge_vm_state() == 1 { henge_vm_stop() }
+         try? FileManager.default.removeItem(at: work)
+diff --git a/ios/Henge/JIT/JITBootstrap.swift b/ios/Henge/JIT/JITBootstrap.swift
+index 5fa95d6..73a0798 100644
+--- a/ios/Henge/JIT/JITBootstrap.swift
++++ b/ios/Henge/JIT/JITBootstrap.swift
+@@ -68,6 +68,8 @@ enum JITBootstrap {
+     static let defaultCodeCacheMB: Int = Entitlements.memoryLimitAtLaunch >= 5_500 << 20 ? 1536
+         : Entitlements.memoryLimitAtLaunch >= 3_500 << 20 ? 1024 : 512
+     static let jitBytes: Int = {
++        if let text = ProcessInfo.processInfo.environment["HENGE_CODE_CACHE_MB"],
++           let cache = Int(text), [512, 1024, 1536].contains(cache) { return cache << 20 }
+         switch (UserDefaults.standard.object(forKey: codeCacheKey) as? Int) ?? defaultCodeCacheMB {
+         case 1536: return 1536 << 20
+         case 512: return 512 << 20
+@@ -430,8 +432,8 @@ enum JITBootstrap {
+         // Accept either bundle layout: the build copies henge-jit.js to the bundle
+         // root, but a folder-reference build phase would put it under Resources/.
+         let candidates = [
+-            Bundle.main.path(forResource: "henge-jit", ofType: "js"),
+-            Bundle.main.path(forResource: "henge-jit", ofType: "js", inDirectory: "Resources"),
++            HengeResources.bundle.path(forResource: "henge-jit", ofType: "js"),
++            HengeResources.bundle.path(forResource: "henge-jit", ofType: "js", inDirectory: "Resources"),
+         ]
+         for case let path? in candidates {
+             if let s = try? String(contentsOfFile: path, encoding: .utf8) { return s }
+diff --git a/ios/Henge/MacApps.swift b/ios/Henge/MacApps.swift
+index 79994cf..be27909 100644
+--- a/ios/Henge/MacApps.swift
++++ b/ios/Henge/MacApps.swift
+@@ -124,7 +124,7 @@ final class MacAppsStore: ObservableObject {
+     }
+ 
+     func addSamples() {
+-        guard let samples = Bundle.main.url(forResource: "tl-samples", withExtension: "dmg") else {
++        guard let samples = HengeResources.bundle.url(forResource: "tl-samples", withExtension: "dmg") else {
+             problem = "This build has no sample programs."
+             return
+         }
+diff --git a/ios/Henge/Machines.swift b/ios/Henge/Machines.swift
+index cae6bad..d8a9c6e 100644
+--- a/ios/Henge/Machines.swift
++++ b/ios/Henge/Machines.swift
+@@ -24,11 +24,13 @@ struct VirtualMac: Identifiable, Codable, Hashable {
+     /// With reportHostIdentity: also report the device's model identifier (hw.model).
+     /// Experimental — it may bring the device's icon, and may confuse macOS.
+     var reportHostModelID: Bool?
++    /// Embedded UTM machines live inside their own .utm package, outside the standalone library.
++    var storagePath: String?
+     var isRetina: Bool { Device.isPad && (retina ?? false) }
+     var screen: (width: Int, height: Int) { isRetina ? Device.retinaScreen : (screenWidth ?? 1920, screenHeight ?? 1080) }
+     var aspect: CGFloat { CGFloat(screen.width) / CGFloat(screen.height) }
+ 
+-    var directory: URL { Machines.directory(for: id) }
++    var directory: URL { storagePath.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? Machines.directory(for: id) }
+     var rom: URL { directory.appendingPathComponent("AVPBooter.vmapple2.bin") }
+     var disk: URL { directory.appendingPathComponent("disk.img") }
+     var aux: URL { directory.appendingPathComponent("auxiliary.bin") }
+@@ -46,7 +48,18 @@ enum GuestMemory {
+             .volumeAvailableCapacityForImportantUsage ?? 0
+         let room = free > 0 ? UInt64(max(free - (2 << 30), 0)) >> 20 : UInt64.max
+         let reach = henge_largest_mapping_mb()
+-        let ram = min(UInt64(mac.ramMB), room, reach > 512 ? reach - 512 : 0) / 512 * 512
++        let available = min(room, reach > 512 ? reach - 512 : 0)
++        // UTM accepts whole MiB: a MiB is already aligned to the host's 16 KiB pages.
++        // Preserve its explicit amount rather than rounding down to a 512 MiB preset.
++        if mac.storagePath != nil {
++            guard UInt64(mac.ramMB) <= available else {
++                HengeLog.log("session", "cannot reserve the exact \(mac.ramMB) MB requested by UTM (disk room \(room), largest mapping \(reach))")
++                return 0
++            }
++            HengeLog.log("session", "guest RAM \(mac.ramMB) MB (exact UTM configuration)")
++            return UInt64(mac.ramMB)
++        }
++        let ram = min(UInt64(mac.ramMB), available) / 512 * 512
+         HengeLog.log("session", "guest RAM \(ram) MB (asked \(mac.ramMB), disk room \(room), largest mapping \(reach))")
+         return ram
+     }
+diff --git a/ios/Henge/Native/henge-vm.c b/ios/Henge/Native/henge-vm.c
+index 0fa1b69..25431c9 100644
+--- a/ios/Henge/Native/henge-vm.c
++++ b/ios/Henge/Native/henge-vm.c
+@@ -196,6 +196,7 @@ static int boot_or_resume(const char *rom, const char *disk, const char *aux, ui
+         return failed_start();
+     }
+     HvVmConfig c = {.rom = rom, .disk = disk, .aux = aux, .ecid = ecid, .seed = seed, .ram_mb = ram_mb, .ncpus = cpus, .log = 1,
++                    .no_net = getenv("HENGE_NO_NET") != NULL, .no_sound = getenv("HENGE_NO_SOUND") != NULL,
+                     .soc_name = identity_soc[0] ? identity_soc : NULL,
+                     .product_name = identity_name[0] ? identity_name : NULL,
+                     .model_id = identity_model[0] ? identity_model : NULL,
+diff --git a/ios/Henge/PhysicalMouseButtons.swift b/ios/Henge/PhysicalMouseButtons.swift
+index 9a5c260..8b3f4f1 100644
+--- a/ios/Henge/PhysicalMouseButtons.swift
++++ b/ios/Henge/PhysicalMouseButtons.swift
+@@ -27,3 +27,43 @@ struct PhysicalMouseButtons {
+         return releases
+     }
+ }
++
++/// Fractional input is retained per physical device, rather than amplified into wheel ticks.
++struct PhysicalMouseMotion {
++    private var x: Float = 0, y: Float = 0
++    private var horizontal: Float = 0, vertical: Float = 0
++
++    mutating func move(dx: Float, dy: Float, speed: Float) -> [(Int32, Int32)] {
++        guard dx.isFinite, dy.isFinite, speed.isFinite,
++              abs(dx) <= 4096, abs(dy) <= 4096 else { return [] }
++        let scale = min(max(speed, 0.1), 4)
++        x += dx * scale
++        y -= dy * scale
++        var wholeX = Int32(x.rounded()), wholeY = Int32(y.rounded())
++        x -= Float(wholeX)
++        y -= Float(wholeY)
++        var packets: [(Int32, Int32)] = []
++        // The guest mouse path uses signed-byte deltas. Preserve the distance
++        // while preventing a large gesture from wrapping to the opposite side.
++        while wholeX != 0 || wholeY != 0 {
++            let px = min(max(wholeX, -127), 127), py = min(max(wholeY, -127), 127)
++            packets.append((px, py))
++            wholeX -= px
++            wholeY -= py
++        }
++        return packets
++    }
++
++    mutating func scroll(_ value: Float, horizontal axis: Bool, trackpad: Bool, scale: Float) -> Int32 {
++        guard value.isFinite, scale.isFinite else { return 0 }
++        let sensitivity = min(max(scale, 0.1), 1.5) / 0.3
++        // Magic Keyboard reports small point deltas at display frequency;
++        // conventional wheel mice report detents. They are different units.
++        let delta = min(max(value * sensitivity / (trackpad ? 24 : 1), -4), 4)
++        var remainder = (axis ? horizontal : vertical) + delta
++        let whole = Int32(remainder.rounded(.towardZero))
++        remainder -= Float(whole)
++        if axis { horizontal = remainder } else { vertical = remainder }
++        return whole
++    }
++}
+diff --git a/ios/Henge/SessionView.swift b/ios/Henge/SessionView.swift
+index bceabe8..b5e5ade 100644
+--- a/ios/Henge/SessionView.swift
++++ b/ios/Henge/SessionView.swift
+@@ -6,6 +6,7 @@ import GameController
+ /// A keyboard, trackpad or mouse attached to an iPad works throughout.
+ struct SessionView: View {
+     let mac: VirtualMac
++    var engineStateChanged: ((String, String?) -> Void)? = nil
+     let close: () -> Void
+ 
+     @StateObject private var display = DisplayRouter()
+@@ -569,76 +570,93 @@ struct SessionView: View {
+     }
+ 
+     private func run() async {
+-        error = nil
+-        state = 0
+-        userCode = false
+-        cpusOn = 0
+-        blocksPerSecond = 0
+-        framesOut = 0
+-        framesIn = 0
+-        zoomed = false
+-        controlsHidden = false
+-        showRevealHint = false
+-        zoomCentre = CGPoint(x: 0.5, y: 0.5)
+-        map = nil
+-        showWallpaperTip = false
+-        while henge_vm_state() == 3 && !Task.isCancelled {
+-            try? await Task.sleep(nanoseconds: 100_000_000)
+-        }
+-        guard !Task.isCancelled else { return }
+-        UIApplication.shared.isIdleTimerDisabled = true
+-        HardwareMouse.shared.start()
+-        let ram = GuestMemory.prepare(mac)
+-        HengeLog.log("session", "available memory \(henge_available_memory() >> 20) MB")
+-        guard ram >= 1024 else {
+-            error = "There is not room for this Mac's memory: it needs a few GB of free storage."
+-            return
+-        }
+-        var buffer = [CChar](repeating: 0, count: 256)
+-        JITBootstrap.releaseLingeringDebugger()
+-        Sharing.prepare()
+-        EngineTuning.apply()
+-        henge_vm_set_display(UInt32(mac.screen.width), UInt32(mac.screen.height))
+-        if mac.isRetina {
+-            henge_vm_set_display_mm(UInt32(Device.retinaMM.width), UInt32(Device.retinaMM.height))
+-        } else {
+-            henge_vm_set_display_mm(0, 0)
+-        }
+-        HengeLog.log("session", "screen \(mac.screen.width)x\(mac.screen.height) retina \(mac.isRetina)")
+-        if mac.reportHostIdentity == true {
+-            let modelID = Device.snappedModelIdentifier(forOS: mac.osName)
+-            henge_vm_set_identity(Device.chipName, Device.marketingName,
+-                                  mac.reportHostModelID == true ? modelID : nil)
+-            HengeLog.log("session", "About This Mac reports \(Device.marketingName) (model \(modelID))")
+-        } else {
+-            henge_vm_set_identity(nil, nil, nil)
+-        }
+-        var rc: Int32 = -1
+-        if InstantResume.enabled, let at = InstantResume.saved(for: mac, ramMB: ram, cpus: cpus) {
+-            HengeLog.log("resume", "picking up the Mac saved \(Int(Date().timeIntervalSince(at))) s ago")
+-            let t0 = Date()
+-            rc = henge_vm_resume(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, mac.seed, ram, Int32(cpus),
+-                                 InstantResume.file(for: mac).path, InstantResume.ident(for: mac, ramMB: ram, cpus: cpus), &buffer, buffer.count)
+-            if rc == 0 {
+-                HengeLog.log("resume", String(format: "resumed in %.1f s", Date().timeIntervalSince(t0)))
++        // UTM retains this controller when returning to its library. Reappearing only rejoins
++        // the same native machine; a cancelled SwiftUI monitoring task must never boot it twice.
++        let rejoining = mac.storagePath != nil && henge_vm_state() != 0
++        if !rejoining {
++            engineStateChanged?("starting", nil)
++            error = nil
++            state = 0
++            userCode = false
++            cpusOn = 0
++            blocksPerSecond = 0
++            framesOut = 0
++            framesIn = 0
++            zoomed = false
++            controlsHidden = false
++            showRevealHint = false
++            zoomCentre = CGPoint(x: 0.5, y: 0.5)
++            map = nil
++            showWallpaperTip = false
++            while henge_vm_state() == 3 && !Task.isCancelled {
++                try? await Task.sleep(nanoseconds: 100_000_000)
++            }
++            guard !Task.isCancelled else { return }
++            UIApplication.shared.isIdleTimerDisabled = true
++            HardwareMouse.shared.start()
++            let ram = GuestMemory.prepare(mac)
++            HengeLog.log("session", "available memory \(henge_available_memory() >> 20) MB")
++            guard ram >= 1024 else {
++                error = mac.storagePath != nil
++                    ? "Cannot reserve the configured \(mac.ramMB) MiB of guest RAM. Free storage or reduce this Mac's RAM setting, then reopen the app."
++                    : "There is not room for this Mac's memory: it needs a few GB of free storage."
++                engineStateChanged?("error", error)
++                return
++            }
++            var buffer = [CChar](repeating: 0, count: 256)
++            JITBootstrap.releaseLingeringDebugger()
++            Sharing.prepare()
++            EngineTuning.apply()
++            henge_vm_set_display(UInt32(mac.screen.width), UInt32(mac.screen.height))
++            if mac.isRetina {
++                henge_vm_set_display_mm(UInt32(Device.retinaMM.width), UInt32(Device.retinaMM.height))
+             } else {
+-                HengeLog.log("resume", "could not resume (\(String(cString: buffer))); starting it from cold")
+-                buffer = [CChar](repeating: 0, count: 256)
++                henge_vm_set_display_mm(0, 0)
+             }
++            HengeLog.log("session", "screen \(mac.screen.width)x\(mac.screen.height) retina \(mac.isRetina)")
++            if mac.reportHostIdentity == true {
++                let modelID = Device.snappedModelIdentifier(forOS: mac.osName)
++                henge_vm_set_identity(Device.chipName, Device.marketingName,
++                                      mac.reportHostModelID == true ? modelID : nil)
++                HengeLog.log("session", "About This Mac reports \(Device.marketingName) (model \(modelID))")
++            } else {
++                henge_vm_set_identity(nil, nil, nil)
++            }
++            var rc: Int32 = -1
++            if InstantResume.enabled, let at = InstantResume.saved(for: mac, ramMB: ram, cpus: cpus) {
++                HengeLog.log("resume", "picking up the Mac saved \(Int(Date().timeIntervalSince(at))) s ago")
++                let t0 = Date()
++                rc = henge_vm_resume(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, mac.seed, ram, Int32(cpus),
++                                     InstantResume.file(for: mac).path, InstantResume.ident(for: mac, ramMB: ram, cpus: cpus), &buffer, buffer.count)
++                if rc == 0 {
++                    HengeLog.log("resume", String(format: "resumed in %.1f s", Date().timeIntervalSince(t0)))
++                } else {
++                    HengeLog.log("resume", "could not resume (\(String(cString: buffer))); starting it from cold")
++                    buffer = [CChar](repeating: 0, count: 256)
++                }
++            }
++            InstantResume.discard(for: mac) /* used or out of date: the disk moves on from here */
++            if rc != 0 {
++                rc = henge_vm_boot(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, mac.seed, ram, Int32(cpus), &buffer, buffer.count)
++            }
++            if rc != 0 {
++                error = String(cString: buffer)
++                engineStateChanged?("error", error)
++                return
++            }
++            engineStateChanged?("started", nil)
++            bootRAM = ram
++            started = Date()
++            var used = mac
++            used.lastUsed = started
++            if used.storagePath == nil { Machines.shared.update(used) }
++        } else {
++            bootRAM = UInt64(mac.ramMB)
++            state = henge_vm_state()
++            if state == 4 { InstantResume.cameBack(mac) }
++            if state == 1 || state == 4 { engineStateChanged?("started", nil) }
++            HengeLog.log("utm", "rejoined the retained Mac session without booting again")
+         }
+-        InstantResume.discard(for: mac) /* used or out of date: the disk moves on from here */
+-        if rc != 0 {
+-            rc = henge_vm_boot(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, mac.seed, ram, Int32(cpus), &buffer, buffer.count)
+-        }
+-        if rc != 0 {
+-            error = String(cString: buffer)
+-            return
+-        }
+-        bootRAM = ram
+-        started = Date()
+-        var used = mac
+-        used.lastUsed = started
+-        Machines.shared.update(used)
+         var lastBlocks = henge_vm_blocks()
+         var lastTime = Date()
+         var lastGPUFrames = henge_vm_gpu_frames()
+@@ -665,6 +683,7 @@ struct SessionView: View {
+                 HengeLog.log("session", "thermal state: \(Self.thermalLabel(heat))")
+             }
+             if state == 2 {
++                engineStateChanged?(henge_vm_exit_outcome() == Int32(HENGE_VM_OUTCOME_ERROR.rawValue) ? "error" : "stopped", String(cString: henge_vm_exit_reason()))
+                 typing = false
+                 showDetails = false
+                 confirmStop = false
+diff --git a/ios/Henge/Sharing.swift b/ios/Henge/Sharing.swift
+index 925f81c..063d24c 100644
+--- a/ios/Henge/Sharing.swift
++++ b/ios/Henge/Sharing.swift
+@@ -18,7 +18,7 @@ enum Sharing {
+         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+         // A Unix socket's path can't be long, so the short temporary folder.
+         let socket = (NSTemporaryDirectory() as NSString).appendingPathComponent("s.sock")
+-        henge_vm_share(folder.path, socket, Bundle.main.path(forResource: "henge-agent", ofType: "gz"))
++        henge_vm_share(folder.path, socket, HengeResources.bundle.path(forResource: "henge-agent", ofType: "gz"))
+     }
+ 
+     /// The helper asks the server for news at most 25 s apart.
+diff --git a/ios/Henge/Trackpad.swift b/ios/Henge/Trackpad.swift
+index d278847..ec29729 100644
+--- a/ios/Henge/Trackpad.swift
++++ b/ios/Henge/Trackpad.swift
+@@ -77,7 +77,7 @@ struct Trackpad: UIViewRepresentable {
+         private static func ms(_ t: TimeInterval) -> UInt32 { UInt32(truncatingIfNeeded: Int(t * 1000)) }
+ 
+         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+-            let touches = touches.filter { $0.type != .indirectPointer }
++            let touches = touches.filter { $0.type == .direct }
+             guard !touches.isEmpty else { return }
+             if fingers.isEmpty {
+                 started = Date()
+@@ -112,7 +112,7 @@ struct Trackpad: UIViewRepresentable {
+         override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+             var moved = false
+             let ts = Self.ms(event?.timestamp ?? touches.first?.timestamp ?? 0)
+-            for t in touches where t.type != .indirectPointer {
++            for t in touches where t.type == .direct {
+                 guard let i = fingers.firstIndex(where: { $0.touch == t }) else { continue }
+                 let now = t.location(in: self), before = t.previousLocation(in: self)
+                 travelled += abs(now.x - before.x) + abs(now.y - before.y)
+@@ -133,7 +133,7 @@ struct Trackpad: UIViewRepresentable {
+         private func lift(_ touches: Set<UITouch>) {
+             var lifted: [Int32] = []
+             fingers.removeAll { finger in
+-                guard touches.contains(finger.touch), finger.touch.type != .indirectPointer else { return false }
++                guard touches.contains(finger.touch), finger.touch.type == .direct else { return false }
+                 freeIds.insert(finger.id)
+                 lifted.append(finger.id)
+                 return true
+@@ -217,4 +217,4 @@ struct MouseButton: View {
+             )
+             .accessibilityLabel(title)
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/ios/embedded.yml b/ios/embedded.yml
+new file mode 100644
+index 0000000..3a8fc80
+--- /dev/null
++++ b/ios/embedded.yml
+@@ -0,0 +1,115 @@
++name: HengeBackend
++options:
++  deploymentTarget:
++    iOS: "17.0"
++  createIntermediateGroups: true
++settings:
++  base:
++    ARCHS: arm64
++    ONLY_ACTIVE_ARCH: YES
++    ENABLE_BITCODE: NO
++    SWIFT_VERSION: "5.0"
++    SWIFT_OPTIMIZATION_LEVEL: "-O"
++    GCC_OPTIMIZATION_LEVEL: "2"
++    CLANG_C_LANGUAGE_STANDARD: c11
++    CODE_SIGNING_ALLOWED: NO
++    BUILD_LIBRARY_FOR_DISTRIBUTION: YES
++    SKIP_INSTALL: NO
++    DEFINES_MODULE: YES
++    CLANG_ENABLE_MODULES: YES
++    GENERATE_INFOPLIST_FILE: YES
++    SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) HENGE_EMBEDDED"
++    EXPORTED_SYMBOLS_FILE: "$(SRCROOT)/Embedded/exports.txt"
++    HEADER_SEARCH_PATHS:
++      - "$(SRCROOT)/../core"
++      - "$(SRCROOT)/../host"
++      - "$(SRCROOT)/../devices"
++    LIBRARY_SEARCH_PATHS:
++      - "$(inherited)"
++      - "$(SRCROOT)/../build/ios"
++      - "$(SRCROOT)/deps/lib"
++    LD_RUNPATH_SEARCH_PATHS:
++      - "$(inherited)"
++      - "@executable_path/Frameworks"
++      - "@loader_path/Frameworks"
++targets:
++  HengeBackend:
++    type: framework
++    platform: iOS
++    sources:
++      - path: Henge
++        excludes:
++          - "Resources/**"
++          - "Info.plist"
++          - "*.entitlements"
++          - "AppIcon.icon/**"
++          - "AppIcon.icon"
++          - "HengeBridge.h"
++          - "Native/*.h"
++      - path: Embedded/UTMHengeBackend.swift
++      - path: Embedded/HengeBackend.h
++        headerVisibility: public
++      - path: Henge/Native/henge-ios-jit.h
++        headerVisibility: public
++      - path: Henge/Native/henge-vm.h
++        headerVisibility: public
++      - path: Henge/Native/henge-tl.h
++        headerVisibility: public
++      - path: Henge/Native/HuskRPPairing.h
++        headerVisibility: public
++      - path: ../host/hvsparse.h
++        headerVisibility: public
++      - path: Henge/Resources
++        buildPhase: resources
++      - path: deps/legal
++        type: folder
++        buildPhase: resources
++      - path: HengeJITHelper/HengeJITMessages.swift
++      - path: ../LICENSE
++        buildPhase: resources
++      - path: ../docs/licensing.md
++        buildPhase: resources
++      - path: ../build/henge-agent.gz
++        buildPhase: resources
++      - path: ../build/tl-samples.dmg
++        buildPhase: resources
++    settings:
++      base:
++        PRODUCT_BUNDLE_IDENTIFIER: com.windowsios.HengeBackend
++        PRODUCT_NAME: HengeBackend
++        OTHER_LDFLAGS:
++          - "$(inherited)"
++          - "-lhengevm"
++          - "-lhengerestore"
++          - "-lhengetl"
++          - "-lhusk_rppairing"
++          - "-lslirp"
++          - "-lglib-2.0"
++          - "-lintl"
++          - "-lpcre2-8"
++          - "-liconv"
++          - "-lresolv"
++          - "-lcompression"
++          - "-lz"
++          - "-lbz2"
++          - "-ObjC"
++          - "-framework"
++          - "Metal"
++          - "-framework"
++          - "IOSurface"
++          - "-framework"
++          - "AudioToolbox"
++          - "-framework"
++          - "AVFAudio"
++          - "-framework"
++          - "CoreFoundation"
++          - "-framework"
++          - "QuartzCore"
++          - "-framework"
++          - "CoreText"
++          - "-framework"
++          - "ImageIO"
++          - "-framework"
++          - "CoreVideo"
++          - "-framework"
++          - "UniformTypeIdentifiers"
+diff --git a/ios/project.yml b/ios/project.yml
+index 8a9eb26..07d52fd 100644
+--- a/ios/project.yml
++++ b/ios/project.yml
+@@ -35,6 +35,9 @@ targets:
+           - "AppIcon.icon"
+       - path: Henge/Resources
+         buildPhase: resources
++      - path: deps/legal
++        type: folder
++        buildPhase: resources
+       # Icon Composer's document: the app icon, which iOS renders in Liquid Glass.
+       - path: Henge/AppIcon.icon
+         type: file
+diff --git a/tools/build_ios_restore.sh b/tools/build_ios_restore.sh
+index 70d7ccb..536479b 100755
+--- a/tools/build_ios_restore.sh
++++ b/tools/build_ios_restore.sh
+@@ -55,7 +55,7 @@ if [ ! -f "$DEPS/libzip/lib/libzip.a" ]; then
+         -DENABLE_GNUTLS=OFF -DENABLE_MBEDTLS=OFF -DENABLE_OPENSSL=OFF -DENABLE_WINDOWS_CRYPTO=OFF -DENABLE_BZIP2=OFF \
+         -DENABLE_LZMA=OFF -DENABLE_ZSTD=OFF -DBUILD_TOOLS=OFF -DBUILD_REGRESS=OFF -DBUILD_OSSFUZZ=OFF \
+         -DBUILD_EXAMPLES=OFF -DBUILD_DOC=OFF -DLIBZIP_DO_INSTALL=OFF >/dev/null
+-    cmake --build "$DEPS/libzip" -j4 >/dev/null
++    cmake --build "$DEPS/libzip" -j2 >/dev/null
+ fi
+ 
+ compile mbedtls -I"$TP/mbedtls/library" -- "$TP"/mbedtls/library/*.c

@@ -70,6 +70,7 @@ For development signing, use your own team and a profile registering your iPad:
 
 ```bash
 DEVELOPMENT_TEAM=YOUR_TEAM_ID \
+BUNDLE_IDENTIFIER=com.yourname.windowsios \
 JOBS=2 ./Build.command
 ```
 
@@ -83,6 +84,83 @@ Settings > Accounts. Automatic signing can fetch or create a matching profile;
 an installed certificate or a profile from another team is not enough. Set
 `PROVISIONING_PROFILE_SPECIFIER` only for a manually managed profile; Xcode
 rejects Xcode-managed profiles when forced into manual signing mode.
+
+### Memory allowance and signing identity
+
+The build requests Apple's [Increased Memory Limit](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.kernel.increased-memory-limit)
+and [Extended Virtual Addressing](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.kernel.extended-virtual-addressing).
+The first requests a higher process memory budget on supported devices; the
+second allows a larger virtual address space for guest mappings. Neither
+creates physical RAM or guarantees a particular guest allocation. A business
+configuration profile alone is not proof that these app capabilities are
+authorized: both the signature and the embedded provisioning profile must
+grant them. Signed `BUILD_INFO.json` records both grants.
+
+On a **16 GiB iPad**, the existing physical-memory policy permits up to
+**13312 MiB (13 GiB)** of guest RAM, leaving 3 GiB for iPadOS and the app.
+The displayed maximum is an admission ceiling, not an existing allocation or
+the app's remaining process allowance. There is no separate 5 GiB guest cap.
+The original app incorrectly rejected a 4 GiB guest when process headroom was
+below 5 GiB, before trying its file-backed allocator. That check is now removed.
+Startup reserves the exact selected mapping before creating the engine. If
+ledger-exempt memory is refused, it reserves temporary-file storage and maps
+that lazily, retaining at least 1 GiB of remaining process headroom for the
+engine. A 6 GiB request is **6144 MiB**; 8 GiB is **8192 MiB**. The fallback
+requires free storage equal to the guest setting and can be slower under
+memory pressure; it does not add physical RAM. Allocation errors now identify
+the actual storage/address-space failure and can be retried with a changed
+setting before engine creation. After a VM has been created, reopen the app
+before changing its RAM. Clearing background apps or restarting iPadOS cannot
+change the app's signed memory entitlement or repair the old admission check.
+
+For the **original Windows 11 app ID**, a separately packaged fix is available
+under `distribution/reservation-fixed-original/`. It uses the existing
+development profile without the two optional capabilities and can be installed
+as an update to the matching original app without moving its VM container.
+Do not delete the existing app to install it. To rebuild:
+
+```bash
+DEVELOPMENT_TEAM=V3C22X6SVS MEMORY_CAPABILITIES=NO \
+DIST_DIR="$PWD/distribution/reservation-fixed-original" \
+DERIVED_DATA="$PWD/build/DerivedData-original-reservation" \
+JOBS=2 ./Build.command
+```
+
+This variant fixes the false rejection; a genuine larger virtual-address
+mapping failure may still require the capability-enabled variant below.
+
+For this Mac, Apple refused to register `me.ammaar.windowsios` to the available
+team. The separately built **Windows 11 RAM** app uses
+`com.thomas20090425.windowsios` with an explicit profile authorizing both memory
+capabilities. Its outputs are under `distribution/memory-enabled`; the earlier
+app and IPA under `distribution/` remain intact. Rebuild this variant with:
+
+```bash
+DEVELOPMENT_TEAM=V3C22X6SVS \
+BUNDLE_IDENTIFIER=com.thomas20090425.windowsios \
+APP_DISPLAY_NAME='Windows 11 RAM' \
+DIST_DIR="$PWD/distribution/memory-enabled" \
+DERIVED_DATA="$PWD/build/DerivedData-memory" \
+JOBS=2 ./Build.command
+```
+
+A different bundle identifier creates a separate app container. To reuse an
+existing VM, shut Windows down and close the old app, then **copy the complete
+machine folder** from the old app's `Machines` folder to the new app's
+`Machines` folder using Files or Finder file sharing. Include `configuration.json`,
+`windows11.img`, `vars.fd`, `TPM/`, `tpm-state-initialized` and any other files in
+that machine folder together. Keep the original copy. Reopen the new app to
+refresh its library, then set the RAM allowance. Do not open both copies of
+the VM at once. These are owner-run migration steps, not an observed transfer.
+
+The Mac JIT launch must use the new identity and matching local app:
+
+```bash
+./scripts/launch_on_device.sh DEVICE_ID com.thomas20090425.windowsios distribution/memory-enabled/WindowsiOS.app
+```
+
+Both variants are build/signature-verified only. The connected iPad's existing
+diagnostics were read, but no guest allocation was initiated by the agent.
 
 ## Install the app and import your Windows ISO
 

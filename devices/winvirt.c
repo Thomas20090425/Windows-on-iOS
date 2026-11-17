@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "winvirt.h"
 
+#include <TargetConditionals.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <mach/mach.h>
@@ -12,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -29,25 +31,36 @@ uint8_t *hv_alloc_no_footprint(uint64_t size) {
         LEDGER_NO_FOOTPRINT = 1,
     };
     vm_address_t base = 0;
-    if (vm_allocate(mach_task_self(), &base, size, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) return NULL;
+    kern_return_t allocation_status = vm_allocate(mach_task_self(), &base, size, VM_FLAGS_ANYWHERE);
+    if (allocation_status != KERN_SUCCESS) {
+        fprintf(stderr, "winvm: guest RAM reservation of %llu MiB failed at vm_allocate: %s (kernel code %d)\n",
+                (unsigned long long)(size >> 20), mach_error_string(allocation_status), allocation_status);
+        return NULL;
+    }
     for (uint64_t off = 0; off < size; off += CHUNK) {
         uint64_t len = size - off < CHUNK ? size - off : CHUNK;
         memory_object_size_t got = len;
         mach_port_t entry = MACH_PORT_NULL;
+        const char *stage = "mach_make_memory_entry_64";
         kern_return_t kr = mach_make_memory_entry_64(
             mach_task_self(), &got, 0,
             MAP_MEM_NAMED_CREATE_ | MAP_MEM_LEDGER_TAGGED_ | VM_PROT_READ | VM_PROT_WRITE,
             &entry, MACH_PORT_NULL);
-        if (kr == KERN_SUCCESS)
-            kr = mach_memory_entry_ownership(entry, TASK_NULL, LEDGER_TAG_DEFAULT, LEDGER_NO_FOOTPRINT);
         if (kr == KERN_SUCCESS) {
+            stage = "mach_memory_entry_ownership";
+            kr = mach_memory_entry_ownership(entry, TASK_NULL, LEDGER_TAG_DEFAULT, LEDGER_NO_FOOTPRINT);
+        }
+        if (kr == KERN_SUCCESS) {
+            stage = "vm_map";
             vm_address_t to = base + off;
             kr = vm_map(mach_task_self(), &to, len, 0, VM_FLAGS_OVERWRITE, entry, 0, FALSE,
                         VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_NONE);
         }
         if (entry != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), entry);
         if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "winvm: guest RAM outside footprint refused (%s), falling back\n", mach_error_string(kr));
+            fprintf(stderr, "winvm: ledger-exempt guest RAM %llu MiB failed at %s, offset %llu MiB: %s (kernel code %d); falling back\n",
+                    (unsigned long long)(size >> 20), stage, (unsigned long long)(off >> 20),
+                    mach_error_string(kr), kr);
             vm_deallocate(mach_task_self(), base, size);
             return NULL;
         }
@@ -57,6 +70,90 @@ uint8_t *hv_alloc_no_footprint(uint64_t size) {
     return (uint8_t *)base;
 }
 
+uint8_t *hv_alloc_file_backed_ram(uint64_t size, const char *path_template,
+                                 char *error, size_t error_size) {
+    const char *stage = "validate size";
+    int saved_error = EINVAL;
+    char *path = NULL;
+    int fd = -1;
+    int linked = 0;
+    void *mapping = MAP_FAILED;
+    if (error && error_size) error[0] = '\0';
+    if (!size) goto fail;
+    if (size > SIZE_MAX || size > INT64_MAX || (uint64_t)(off_t)size != size) {
+        saved_error = EOVERFLOW;
+        goto fail;
+    }
+    stage = "validate backing-file template";
+    if (!path_template || !*path_template) goto fail;
+    size_t length = strlen(path_template);
+    int has_suffix = length >= 6 && !strcmp(path_template + length - 6, "XXXXXX");
+    if (length > SIZE_MAX - 8) {
+        saved_error = ENAMETOOLONG;
+        goto fail;
+    }
+    stage = "allocate backing-file template";
+    path = malloc(length + (has_suffix ? 1 : 8));
+    if (!path) {
+        saved_error = ENOMEM;
+        goto fail;
+    }
+    memcpy(path, path_template, length + 1);
+    if (!has_suffix) memcpy(path + length, ".XXXXXX", 8);
+
+    stage = "mkstemp";
+    fd = mkstemp(path);
+    if (fd < 0) { saved_error = errno; goto fail; }
+    linked = 1;
+    stage = "secure backing-file permissions";
+    if (fchmod(fd, 0600) != 0) { saved_error = errno; goto fail; }
+    stage = "set backing-file close-on-exec";
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) { saved_error = errno; goto fail; }
+
+    /* ftruncate alone creates a sparse file. Reserve its full storage before
+     * exposing guest RAM so later writes do not depend on unreserved space. */
+    fstore_t storage = {0};
+    storage.fst_flags = F_ALLOCATEALL;
+    storage.fst_posmode = F_PEOFPOSMODE;
+    storage.fst_length = (off_t)size;
+    stage = "F_PREALLOCATE (full backing storage)";
+    if (fcntl(fd, F_PREALLOCATE, &storage) != 0) { saved_error = errno; goto fail; }
+    if (storage.fst_bytesalloc < (off_t)size) { saved_error = ENOSPC; goto fail; }
+    stage = "ftruncate";
+    if (ftruncate(fd, (off_t)size) != 0) { saved_error = errno; goto fail; }
+    stage = "mmap (shared file backing)";
+    mapping = mmap(NULL, (size_t)size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mapping == MAP_FAILED) { saved_error = errno; goto fail; }
+    /* NULL is the public failure sentinel for this allocator. */
+    if (!mapping) { saved_error = ENOMEM; goto fail; }
+    stage = "unlink temporary backing file";
+    if (unlink(path) != 0) { saved_error = errno; goto fail; }
+    linked = 0;
+    stage = "close backing-file descriptor";
+    int close_status = close(fd);
+    saved_error = errno;
+    fd = -1;
+    if (close_status != 0) goto fail;
+    free(path);
+    fprintf(stderr, "winvm: reserved %llu MiB guest address space with fully allocated temporary-file backing; physical pages remain demand-paged\n",
+            (unsigned long long)(size >> 20));
+    return mapping;
+
+fail:
+    if (mapping != MAP_FAILED) munmap(mapping, (size_t)size);
+    if (fd >= 0) close(fd);
+    if (linked) unlink(path);
+    free(path);
+    if (error && error_size)
+        snprintf(error, error_size, "Guest RAM %llu MiB failed at %s: %s (errno %d).",
+                 (unsigned long long)(size >> 20), stage, strerror(saved_error), saved_error);
+    fprintf(stderr, "winvm: guest RAM %llu MiB failed at %s: %s (errno %d)\n",
+            (unsigned long long)(size >> 20), stage, strerror(saved_error), saved_error);
+    errno = saved_error;
+    return NULL;
+}
+
+#if !TARGET_OS_IPHONE
 struct PrefaultArgs {
     uint8_t *ram;
     uint64_t size;
@@ -70,6 +167,7 @@ static void *prefault_thread(void *arg) {
         __atomic_fetch_add((volatile uint64_t *)(a.ram + off), 0, __ATOMIC_RELAXED);
     return NULL;
 }
+#endif
 
 /* ACPI0013 Generic Event Device (GED) at 0x09080000: read clears latched event bits. */
 static uint64_t ged_read(void *opaque, uint64_t off, unsigned size) {
@@ -137,13 +235,12 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
         if (p) b->ram = p;
     }
     if (b->ram == MAP_FAILED && ram_file && *ram_file) {
-        int fd = open(ram_file, O_RDWR | O_CREAT | O_TRUNC, 0600);
-        if (fd >= 0) {
-            unlink(ram_file);
-            if (ftruncate(fd, (off_t)ram_size) == 0)
-                b->ram = mmap(NULL, ram_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-            close(fd);
-        }
+        uint8_t *mapping = hv_alloc_file_backed_ram(ram_size, ram_file, error, error_size);
+        if (!mapping) return -1;
+        b->ram = mapping;
+        /* On iOS, eagerly touching a large mapping creates a full-RAM
+         * pressure spike before Windows can manage its own working set. */
+#if !TARGET_OS_IPHONE
         if (b->ram != MAP_FAILED && !getenv("HV_RAM_NO_PREFAULT")) {
             struct PrefaultArgs *a = malloc(sizeof *a);
             if (a) {
@@ -154,6 +251,7 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
                 else free(a);
             }
         }
+#endif
     }
     if (b->ram == MAP_FAILED)
         b->ram = mmap(NULL, ram_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -176,7 +274,12 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
     }
 
     /* 4. Register Guest RAM at 0x40000000 */
-    hv_machine_add_ram(m, WINVIRT_RAM_PA, ram_size, b->ram, 0);
+    if (hv_machine_add_ram(m, WINVIRT_RAM_PA, ram_size, b->ram, 0) != 0) {
+        if (error && error_size)
+            snprintf(error, error_size, "Cannot allocate translation metadata for %llu MiB guest RAM.",
+                     (unsigned long long)(ram_size >> 20));
+        return -1;
+    }
 
     /* 5. Interrupt controller: GICv3 + GICv3 ITS (LPI MSI-X for NVMe, xHCI, VirtIO) */
     b->gic = hv_gicv3_create(m, WINVIRT_GIC_DIST_PA, WINVIRT_GIC_REDIST_PA);

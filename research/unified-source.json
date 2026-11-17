@@ -1,0 +1,21 @@
+{
+  "utm": {
+    "repository": "https://github.com/utmapp/UTM",
+    "commit": "5d5e1b180be867c795bbeb03ed80087518c0cdae"
+  },
+  "henge": {
+    "repository": "https://github.com/Leviidev/Henge",
+    "commit": "7b557301195f130f900b1b4cd105c9ecf0fbc109"
+  },
+  "patches": {
+    "scripts/patches/henge-unified.patch": "ee812b97d36c27bad4d180e696bcdd9b26ab644b13d19a36455108bd10b64203",
+    "scripts/patches/utm-unified.patch": "c727f016ed95a6db46d5e0796cd132c7f3bd087e55654ba103713e36503c357e"
+  },
+  "native_dependencies": "Pinned receipts research/utm-source.json and research/henge-source.json",
+  "build": "scripts/build_unified_app.sh",
+  "bundle_identifier": "com.thomas20090425.unifiedresearch.UTM",
+  "frontend": "UTM actual frontend, with NativeARM64 configuration backend; original QEMU backend retained",
+  "engine_isolation": "WindowsBackend.framework and HengeBackend.framework with restricted native export lists",
+  "license_notices": "THIRD_PARTY_NOTICES.md; upstream notices and dependency licenses retained in build resources",
+  "validation": "Signed build, model/input/Metal checks; unified on-device guest execution pending."
+}

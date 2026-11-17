@@ -48,7 +48,7 @@ targets:
     info:
       path: Sources/Info.plist
       properties:
-        CFBundleDisplayName: Windows 11
+        CFBundleDisplayName: $(APP_DISPLAY_NAME)
         LSRequiresIPhoneOS: true
         UILaunchScreen: {}
         UIFileSharingEnabled: true
@@ -58,6 +58,9 @@ targets:
         UIViewControllerBasedStatusBarAppearance: false
         NSMicrophoneUsageDescription: "Windows can use your microphone for live voice input and audio capture."
         NSLocalNetworkUsageDescription: "Windows can reach local network services and DNS using this iPad's connection."
+        LSApplicationQueriesSchemes:
+          - utm
+          - henge
         UIBackgroundModes:
           - audio
         UISupportedInterfaceOrientations:
@@ -74,10 +77,13 @@ targets:
       path: WindowsiOS.entitlements
       properties:
         get-task-allow: true
+        com.apple.developer.kernel.increased-memory-limit: true
+        com.apple.developer.kernel.extended-virtual-addressing: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: me.ammaar.windowsios
         PRODUCT_NAME: WindowsiOS
+        APP_DISPLAY_NAME: Windows 11
         TARGETED_DEVICE_FAMILY: "1,2"
         SWIFT_OBJC_BRIDGING_HEADER: $(PROJECT_DIR)/Sources/Native/WindowsiOS-Bridging-Header.h
         HEADER_SEARCH_PATHS:

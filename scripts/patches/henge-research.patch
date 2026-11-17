@@ -1,0 +1,158 @@
+diff --git a/Makefile b/Makefile
+index a81af23..bbe08ca 100644
+--- a/Makefile
++++ b/Makefile
+@@ -189,7 +189,7 @@ $(B)/test_tl_app: tests/test_tl_app.m ios/Henge/Native/henge-tl-app.m ios/Henge/
+ 	  -lz -lbz2 -lcompression -o $@
+ # Sample Mac programs for the app's Mac apps screen, as a disk image (read by the same import path as anyone's).
+ $(B)/tl-samples.dmg: tests/tl/exit3.c tl/tests/hello.c tl/tests/fnd.m tl/tests/swifty.swift tl/tests/cxx.cpp tl/tests/fw.m tl/tests/fwapp.m | $(B)
+-	make -C tl build/hello build/fnd build/swifty build/cxx build/FW.app/Contents/MacOS/fwapp
++	env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET $(MAKE) -B -C tl build/hello build/fnd build/swifty build/cxx build/FW.app/Contents/MacOS/fwapp
+ 	rm -rf $(B)/tl-samples $@ && mkdir -p $(B)/tl-samples
+ 	cp tl/build/hello "$(B)/tl-samples/Hello (C)"
+ 	cp tl/build/fnd "$(B)/tl-samples/Foundation sample"
+diff --git a/ios/Henge/Autopilot.swift b/ios/Henge/Autopilot.swift
+index 6a0a9cc..ec7cc97 100644
+--- a/ios/Henge/Autopilot.swift
++++ b/ios/Henge/Autopilot.swift
+@@ -36,12 +36,13 @@ enum Autopilot {
+         return (try? FileManager.default.moveItem(at: once, to: plan)) != nil
+     }()
+ 
+-    @MainActor static func run(start: @escaping (VirtualMac) -> Void) async {
++    @MainActor static func run(start: @escaping (VirtualMac) -> Void, showInstaller: @escaping () -> Void = {}) async {
+         guard enabled else { return }
+         let url = docs.appendingPathComponent("henge-autopilot.txt")
+         HengeLog.log("autopilot", "following \(url.lastPathComponent)")
+         var done = 0 // lines already run
+         while !Task.isCancelled {
++            writeStatus()
+             let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+             var lines = text.components(separatedBy: "\n")
+             lines.removeLast() // only whole lines: the last piece has no newline yet
+@@ -52,16 +53,64 @@ enum Autopilot {
+                 if line.isEmpty || line.hasPrefix("#") { continue }
+                 /* What is typed may be a password: the log gets its length only. */
+                 HengeLog.log("autopilot", line.hasPrefix("type ") ? "type (\(line.count - 5) characters)" : line)
+-                await perform(line, start: start)
++                await perform(line, start: start, showInstaller: showInstaller)
+             }
+             try? await Task.sleep(nanoseconds: 500_000_000)
+         }
+     }
+ 
+-    @MainActor private static func perform(_ line: String, start: (VirtualMac) -> Void) async {
++    @MainActor private static func writeStatus() {
++        let installer = Installer.shared
++        var phase = "idle", message = ""
++        switch installer.phase {
++        case .idle: break
++        case .checking: phase = "checking"
++        case .downloading: phase = "downloading"
++        case .preparing: phase = "preparing"
++        case .installing: phase = "installing"
++        case .done(let text): phase = "done"; message = text
++        case .failed(let text): phase = "failed"; message = text
++        }
++        let state: [String: Any] = [
++            "timestamp": ISO8601DateFormatter().string(from: Date()),
++            "bundle_id": Bundle.main.bundleIdentifier ?? "unknown",
++            "jit_ready": JITBootstrap.ready, "installer_phase": phase,
++            "installer_message": message, "received_bytes": installer.received,
++            "expected_bytes": installer.expected, "restore_step": installer.step,
++            "restore_progress": installer.stepProgress, "vm_state": henge_vm_state(),
++            "vm_exit_reason": String(cString: henge_vm_exit_reason()),
++            "machines": Machines.shared.all.map { ["name": $0.name, "id": $0.id.uuidString, "ram_mb": $0.ramMB] as [String: Any] }
++        ]
++        if let data = try? JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys]) {
++            try? data.write(to: docs.appendingPathComponent("henge-research-status.json"), options: .atomic)
++        }
++    }
++
++    @MainActor private static func perform(_ line: String, start: (VirtualMac) -> Void, showInstaller: () -> Void) async {
+         let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+         let arg = parts.count > 1 ? parts[1] : ""
+         switch parts[0] {
++        case "install": // install BUILD RAM_MIB NAME; a NEW virtual Mac only, never the physical iPad.
++            let fields = arg.split(separator: " ", maxSplits: 2).map(String.init)
++            guard fields.count == 3,
++                  let release = MacOSRelease.all.first(where: { $0.id == fields[0] }),
++                  let ram = Int(fields[1]), [4096, 6144, 8192].contains(ram),
++                  !fields[2].isEmpty else {
++                HengeLog.log("autopilot", "install wants a known build, 4096/6144/8192 MiB and a name")
++                return
++            }
++            guard !Installer.shared.busy else { return }
++            for _ in 0..<240 where !JITBootstrap.ready {
++                writeStatus()
++                try? await Task.sleep(nanoseconds: 500_000_000)
++            }
++            guard JITBootstrap.ready else { HengeLog.log("autopilot", "JIT is not ready; not restoring"); return }
++            guard !Machines.shared.all.contains(where: { $0.name == fields[2] }) else {
++                HengeLog.log("autopilot", "a Mac with that name already exists; not restoring again")
++                return
++            }
++            showInstaller()
++            Installer.shared.start(release, name: fields[2], ramMB: ram, cpus: 4, keepImage: true)
+         case "mac":
+             for _ in 0..<240 where !JITBootstrap.ready { try? await Task.sleep(nanoseconds: 500_000_000) }
+             guard JITBootstrap.ready else { HengeLog.log("autopilot", "JIT is not on; not starting a Mac"); return }
+diff --git a/ios/Henge/HengeApp.swift b/ios/Henge/HengeApp.swift
+index 6ba71f1..fd661f4 100644
+--- a/ios/Henge/HengeApp.swift
++++ b/ios/Henge/HengeApp.swift
+@@ -91,12 +91,12 @@ struct RootView: View {
+         }
+         .onChange(of: jit.attachGeneration) { _ in JITBootstrap.prewarm() } // the built-in helper attached
+         .task { // testing only: HENGE_AUTOPILOT
+-            await Autopilot.run { mac in
++            await Autopilot.run(start: { mac in
+                 // A session still on screen (its Mac stopped) is closed first: the same value again would start nothing.
+                 guard running != nil else { running = mac; return }
+                 running = nil
+                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { running = mac }
+-            }
++            }, showInstaller: { tab = .install })
+         }
+     }
+ }
+diff --git a/ios/Henge/JIT/JITBootstrap.swift b/ios/Henge/JIT/JITBootstrap.swift
+index 5fa95d6..7c1b913 100644
+--- a/ios/Henge/JIT/JITBootstrap.swift
++++ b/ios/Henge/JIT/JITBootstrap.swift
+@@ -68,6 +68,8 @@ enum JITBootstrap {
+     static let defaultCodeCacheMB: Int = Entitlements.memoryLimitAtLaunch >= 5_500 << 20 ? 1536
+         : Entitlements.memoryLimitAtLaunch >= 3_500 << 20 ? 1024 : 512
+     static let jitBytes: Int = {
++        if let text = ProcessInfo.processInfo.environment["HENGE_CODE_CACHE_MB"],
++           let cache = Int(text), [512, 1024, 1536].contains(cache) { return cache << 20 }
+         switch (UserDefaults.standard.object(forKey: codeCacheKey) as? Int) ?? defaultCodeCacheMB {
+         case 1536: return 1536 << 20
+         case 512: return 512 << 20
+diff --git a/ios/project.yml b/ios/project.yml
+index 8a9eb26..07d52fd 100644
+--- a/ios/project.yml
++++ b/ios/project.yml
+@@ -35,6 +35,9 @@ targets:
+           - "AppIcon.icon"
+       - path: Henge/Resources
+         buildPhase: resources
++      - path: deps/legal
++        type: folder
++        buildPhase: resources
+       # Icon Composer's document: the app icon, which iOS renders in Liquid Glass.
+       - path: Henge/AppIcon.icon
+         type: file
+diff --git a/tools/build_ios_restore.sh b/tools/build_ios_restore.sh
+index 70d7ccb..536479b 100755
+--- a/tools/build_ios_restore.sh
++++ b/tools/build_ios_restore.sh
+@@ -55,7 +55,7 @@ if [ ! -f "$DEPS/libzip/lib/libzip.a" ]; then
+         -DENABLE_GNUTLS=OFF -DENABLE_MBEDTLS=OFF -DENABLE_OPENSSL=OFF -DENABLE_WINDOWS_CRYPTO=OFF -DENABLE_BZIP2=OFF \
+         -DENABLE_LZMA=OFF -DENABLE_ZSTD=OFF -DBUILD_TOOLS=OFF -DBUILD_REGRESS=OFF -DBUILD_OSSFUZZ=OFF \
+         -DBUILD_EXAMPLES=OFF -DBUILD_DOC=OFF -DLIBZIP_DO_INSTALL=OFF >/dev/null
+-    cmake --build "$DEPS/libzip" -j4 >/dev/null
++    cmake --build "$DEPS/libzip" -j2 >/dev/null
+ fi
+ 
+ compile mbedtls -I"$TP/mbedtls/library" -- "$TP"/mbedtls/library/*.c

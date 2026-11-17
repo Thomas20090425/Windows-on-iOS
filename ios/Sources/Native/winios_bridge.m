@@ -357,6 +357,30 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     return (uint64_t)(winios_available_memory_bytes() >> 20);
 }
 
+- (uint64_t)physicalMemoryMB {
+    return NSProcessInfo.processInfo.physicalMemory >> 20;
+}
+
+- (uint64_t)processFootprintMB {
+    uint64_t bytes = 0;
+    return winios_process_footprint_bytes(&bytes) ? bytes >> 20 : 0;
+}
+
+- (uint64_t)guestReservedMemoryMB {
+    uint64_t bytes = 0;
+    (void)winios_jit_guest_ram(&bytes);
+    return bytes >> 20;
+}
+
+- (NSString *)memoryStatusText {
+    char reservation[256];
+    winios_jit_copy_guest_ram_status(reservation, sizeof reservation);
+    uint64_t footprintBytes = 0;
+    BOOL footprintAvailable = winios_process_footprint_bytes(&footprintBytes);
+    return [NSString stringWithFormat:@"%s Available process memory is additional process budget, not unused physical RAM. Process footprint excludes ledger-exempt guest pages.%@",
+            reservation, footprintAvailable ? @"" : @" Process footprint is currently unavailable."];
+}
+
 - (uint64_t)maxGuestMemoryMB {
     /* Conservative admission policy, not a guarantee against Jetsam. Leave
      * physical headroom for iPadOS, dual JIT mappings, translation tables and UI. */
@@ -435,6 +459,14 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 }
 
 - (BOOL)configureMachineDirectory:(NSString *)directory memoryMB:(uint64_t)memoryMB cpuCount:(NSInteger)cpuCount networkEnabled:(BOOL)networkEnabled audioEnabled:(BOOL)audioEnabled {
+    return [self configureDirectory:directory memoryMB:memoryMB cpuCount:cpuCount networkEnabled:networkEnabled audioEnabled:audioEnabled allowUTMPackage:NO];
+}
+
+- (BOOL)configureUTMPackageDirectory:(NSString *)directory memoryMB:(uint64_t)memoryMB cpuCount:(NSInteger)cpuCount networkEnabled:(BOOL)networkEnabled audioEnabled:(BOOL)audioEnabled {
+    return [self configureDirectory:directory memoryMB:memoryMB cpuCount:cpuCount networkEnabled:networkEnabled audioEnabled:audioEnabled allowUTMPackage:YES];
+}
+
+- (BOOL)configureDirectory:(NSString *)directory memoryMB:(uint64_t)memoryMB cpuCount:(NSInteger)cpuCount networkEnabled:(BOOL)networkEnabled audioEnabled:(BOOL)audioEnabled allowUTMPackage:(BOOL)allowUTMPackage {
     if (_deletingMachineDirectory) {
         _vmStatus = @"Wait for virtual machine deletion to finish before starting a session.";
         [self notifyChanged];
@@ -447,8 +479,10 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     }
     NSString *resolved = directory.stringByStandardizingPath.stringByResolvingSymlinksInPath;
     NSString *machines = [[[self documentsPath] stringByAppendingPathComponent:@"Machines"] stringByResolvingSymlinksInPath];
-    if (![resolved hasPrefix:[machines stringByAppendingString:@"/"]]) {
-        _vmStatus = @"Machine files must be imported into Documents/Machines.";
+    BOOL validUTMData = allowUTMPackage && [resolved.lastPathComponent isEqualToString:@"Data"] &&
+        [[[resolved stringByDeletingLastPathComponent] pathExtension].lowercaseString isEqualToString:@"utm"];
+    if (allowUTMPackage ? !validUTMData : ![resolved hasPrefix:[machines stringByAppendingString:@"/"]]) {
+        _vmStatus = allowUTMPackage ? @"The embedded Windows engine requires a managed .utm package's Data directory." : @"Machine files must be imported into Documents/Machines.";
         [self notifyChanged];
         return NO;
     }
@@ -517,7 +551,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 - (NSString *)firmwarePathForDirectory:(NSString *)directory {
     NSString *legacy = [directory stringByAppendingPathComponent:@"code.fd"];
     if ([[NSFileManager defaultManager] fileExistsAtPath:legacy]) return legacy;
-    return [NSBundle.mainBundle pathForResource:@"code" ofType:@"fd" inDirectory:@"Firmware"];
+    return [[NSBundle bundleForClass:WinIOSBridge.class] pathForResource:@"code" ofType:@"fd" inDirectory:@"Firmware"];
 }
 
 - (BOOL)shouldAttachAutomaticAnswersInDirectory:(NSString *)directory {
@@ -676,16 +710,40 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         return;
     }
 
-    NSString *ramBacking = [NSTemporaryDirectory() stringByAppendingPathComponent:@"win11_guest_ram.bin"];
-    setenv("HV_RAM_FILE", ramBacking.fileSystemRepresentation, 1);
+    NSString *ramBacking = [NSTemporaryDirectory() stringByAppendingPathComponent:@"win11_guest_ram.XXXXXX"];
+    uint64_t ramMB = _requestedRamMB;
+    uint64_t availableMB = self.availableMemoryMB;
+    NSString *memoryError = nil;
+    if (ramMB < HV_GUEST_MIN_MEMORY_MB || ramMB > self.maxGuestMemoryMB) {
+        memoryError = [NSString stringWithFormat:@"Requested %llu MiB guest RAM is outside this device's admission range of %llu–%llu MiB (physical RAM: %llu MiB). Choose a value in that range before starting JIT.",
+                       (unsigned long long)ramMB, (unsigned long long)HV_GUEST_MIN_MEMORY_MB,
+                       (unsigned long long)self.maxGuestMemoryMB, (unsigned long long)self.physicalMemoryMB];
+    } else if (availableMB < HV_GUEST_ENGINE_HEADROOM_MB) {
+        memoryError = [NSString stringWithFormat:@"iPadOS currently permits only %llu MiB of additional app memory; the engine needs at least %llu MiB of working headroom. Close other apps and reopen WindowsiOS. The guest RAM setting was not changed.",
+                       (unsigned long long)availableMB, (unsigned long long)HV_GUEST_ENGINE_HEADROOM_MB];
+    } else {
+        /* Attempt the actual mapping before the process-global engine is
+         * created. File-backed RAM must not require guest-size anonymous
+         * process headroom or depend on a private ledger exemption. */
+        char reservationError[512] = {0};
+        if (!winios_jit_reserve_guest_ram(ramMB, ramBacking.fileSystemRepresentation,
+                                        reservationError, sizeof reservationError)) {
+            memoryError = [NSString stringWithFormat:@"Cannot reserve %llu MiB guest RAM: %s. The setting was kept; you can change it and retry before a VM is created.",
+                           (unsigned long long)ramMB, reservationError];
+        }
+    }
+    if (memoryError) {
+        _vmStatus = memoryError;
+        fprintf(stderr, "[winios-memory] %s\n", memoryError.UTF8String);
+        dispatch_async(_diagQueue, ^{ [self writeDiagnosticsSnapshot]; });
+        [self notifyChanged];
+        return;
+    }
 
     uint64_t preallocBytes = 0;
     void *preallocRam = winios_jit_guest_ram(&preallocBytes);
-    uint64_t ramMB = _requestedRamMB;
-    if (ramMB < HV_GUEST_MIN_MEMORY_MB || ramMB > self.maxGuestMemoryMB ||
-        (preallocRam && preallocBytes != (ramMB << 20)) ||
-        (!preallocRam && [self availableMemoryMB] < ramMB + 1024)) {
-        _vmStatus = @"Insufficient guest RAM reservation. Relaunch with the selected memory setting and attach the JIT helper; no unsafe low-memory fallback was used.";
+    if (!preallocRam || preallocBytes != (ramMB << 20)) {
+        _vmStatus = @"Guest RAM mapping does not match the selected size. The VM was not created.";
         [self notifyChanged];
         return;
     }
@@ -724,7 +782,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     NSString *installerISO = [dir stringByAppendingPathComponent:@"installer.iso"];
     BOOL hasInstallerISO = [[NSFileManager defaultManager] fileExistsAtPath:installerISO];
     NSString *answerDisk = [dir stringByAppendingPathComponent:@"setup-support.img"];
-    NSString *driverDisk = [NSBundle.mainBundle pathForResource:@"drivers" ofType:@"img" inDirectory:@"WindowsDrivers"];
+    NSString *driverDisk = [[NSBundle bundleForClass:WinIOSBridge.class] pathForResource:@"drivers" ofType:@"img" inDirectory:@"WindowsDrivers"];
     if (!driverDisk) {
         _vmStatus = @"This app build is missing its bundled Windows ARM64 driver disk. Reinstall the current build.";
         [self notifyChanged];
@@ -884,7 +942,14 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
     double hingeDeg = _hingeAngleDegrees;
     os_unfair_lock_unlock(&_metricsLock);
 
+    uint64_t footprintBytes = 0;
+    NSString *footprint = winios_process_footprint_bytes(&footprintBytes) ?
+        [NSString stringWithFormat:@"%llu", (unsigned long long)(footprintBytes >> 20)] : @"unavailable";
+    WinIosGuestRamKind ramKind = winios_jit_guest_ram_kind();
+    NSString *ramBackend = ramKind == WINIOS_GUEST_RAM_FILE_BACKED ? @"file-backed" :
+                          ramKind == WINIOS_GUEST_RAM_LEDGER_EXEMPT ? @"ledger-exempt" : @"none";
     NSString *txt = [NSString stringWithFormat:
+        @"bundle_id: %@\n"
         @"vm_running: %@\n"
         @"vm_status: %@\n"
         @"jit_live: %@\n"
@@ -893,6 +958,13 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         @"cpus: %d\n"
         @"ram_mb: %llu\n"
         @"avail_mem_mb: %llu\n"
+        @"physical_ram_mb: %llu\n"
+        @"process_footprint_mb: %@\n"
+        @"requested_ram_mb: %llu\n"
+        @"guest_reserved_mb: %llu\n"
+        @"guest_ram_backend: %@\n"
+        @"guest_memory_limit_mb: %llu\n"
+        @"memory_status: %@\n"
         @"jit_used_mb: %.1f\n"
         @"jit_cap_mb: %.0f\n"
         @"jit_full_flushes: %llu\n"
@@ -907,6 +979,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         @"hinge_status: %ld\n"
         @"hinge_angle_deg: %.1f\n"
         @"screen_pts: %.0fx%.0f @%.0fx\n",
+        NSBundle.mainBundle.bundleIdentifier ?: @"unknown",
         running ? @"true" : @"false",
         _vmStatus ?: @"",
         self.isJITLive ? @"true" : @"false",
@@ -915,6 +988,13 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         _configuredCPUs,
         _configuredRamMB,
         [self availableMemoryMB],
+        self.physicalMemoryMB,
+        footprint,
+        _requestedRamMB,
+        self.guestReservedMemoryMB,
+        ramBackend,
+        self.maxGuestMemoryMB,
+        self.memoryStatusText,
         (double)jitUsedBytes / (1024.0 * 1024.0),
         (double)jitCapBytes / (1024.0 * 1024.0),
         jitFullFlushes,

@@ -3,17 +3,17 @@ import Foundation
 
 enum VMBundledFirmware {
     static var codeURL: URL? {
-        Bundle.main.url(forResource: "code", withExtension: "fd", subdirectory: "Firmware")
+        Bundle(for: WinIOSBridge.self).url(forResource: "code", withExtension: "fd", subdirectory: "Firmware")
     }
 
     static var variablesURL: URL? {
-        Bundle.main.url(forResource: "vars-template", withExtension: "fd", subdirectory: "Firmware")
+        Bundle(for: WinIOSBridge.self).url(forResource: "vars-template", withExtension: "fd", subdirectory: "Firmware")
     }
 }
 
 enum VMBundledDrivers {
-    static var imageURL: URL? { Bundle.main.url(forResource: "drivers", withExtension: "img", subdirectory: "WindowsDrivers") }
-    static var manifestURL: URL? { Bundle.main.url(forResource: "provenance", withExtension: "json", subdirectory: "WindowsDrivers") }
+    static var imageURL: URL? { Bundle(for: WinIOSBridge.self).url(forResource: "drivers", withExtension: "img", subdirectory: "WindowsDrivers") }
+    static var manifestURL: URL? { Bundle(for: WinIOSBridge.self).url(forResource: "provenance", withExtension: "json", subdirectory: "WindowsDrivers") }
 }
 
 extension VMLibraryFiles {

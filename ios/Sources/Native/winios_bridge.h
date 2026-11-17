@@ -23,6 +23,12 @@ typedef void (^WinIOSStateCallback)(void);
 @property (nonatomic, readonly) uint32_t framebufferHeight;
 @property (nonatomic, readonly) uint64_t presentedFrames;
 @property (nonatomic, readonly) uint64_t availableMemoryMB;
+@property (nonatomic, readonly) uint64_t physicalMemoryMB;
+/* Zero when unavailable; memoryStatusText distinguishes that case. */
+@property (nonatomic, readonly) uint64_t processFootprintMB;
+/* Exact guest mapping size; this is not its resident physical footprint. */
+@property (nonatomic, readonly) uint64_t guestReservedMemoryMB;
+@property (nonatomic, readonly) NSString *memoryStatusText;
 @property (nonatomic, readonly) uint64_t maxGuestMemoryMB;
 @property (nonatomic, readonly) NSString *runtimeCapabilityText;
 @property (nonatomic, readonly) NSString *networkStatusText;
@@ -46,6 +52,8 @@ typedef void (^WinIOSStateCallback)(void);
 - (BOOL)beginDeletingMachineDirectory:(NSString *)directory;
 - (void)finishDeletingMachineDirectory:(NSString *)directory;
 - (BOOL)configureMachineDirectory:(NSString *)directory memoryMB:(uint64_t)memoryMB cpuCount:(NSInteger)cpuCount networkEnabled:(BOOL)networkEnabled audioEnabled:(BOOL)audioEnabled;
+/* Host integration: a managed .utm package's canonical Data directory. */
+- (BOOL)configureUTMPackageDirectory:(NSString *)directory memoryMB:(uint64_t)memoryMB cpuCount:(NSInteger)cpuCount networkEnabled:(BOOL)networkEnabled audioEnabled:(BOOL)audioEnabled;
 - (BOOL)configureRuntimeOptions:(NSDictionary<NSString *, NSNumber *> *)options;
 - (BOOL)configureDisplayResolutionMode:(NSInteger)mode width:(NSInteger)width height:(NSInteger)height dynamicResolution:(BOOL)dynamic;
 - (BOOL)needsSparseUnpack;

@@ -1,0 +1,295 @@
+--- a/devices/pvg_metal.m
++++ b/devices/pvg_metal.m
+@@ -59,6 +59,86 @@
+ @end
+ 
+ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OBJ_LINEAR_TEXTURE = 8, OBJ_MAPPED_TEXTURE = 0xb };
++
++/* BEGIN LINEAR BACKING: also compiled by the focused Metal round-trip harness. */
++@interface HvLinearBacking : NSObject {
++@public
++    id<MTLBuffer> buffer;
++    NSUInteger row, width_bytes, height;
++}
++@end
++@implementation HvLinearBacking
++@end
++
++static HvLinearBacking *make_linear_backing(id<MTLDevice> device, NSUInteger bytes, NSUInteger height) {
++    if (!bytes || !height || bytes > NSUIntegerMax - 4095) return nil;
++    NSUInteger row = (bytes + 4095) & ~(NSUInteger)4095;
++    if (height > device.maxBufferLength / row) return nil;
++    HvLinearBacking *backing = [HvLinearBacking new];
++    backing->buffer = [device newBufferWithLength:row * height options:MTLResourceStorageModeShared];
++    if (!backing->buffer) return nil;
++    backing->row = row, backing->width_bytes = bytes, backing->height = height;
++    return backing;
++}
++
++/* Buffer copies have no linear-texture row alignment requirement. Byte-sized
++   layouts use a compute copy when Metal's buffer blit alignment does not fit. */
++static BOOL copy_linear_rows(id<MTLDevice> device, id<MTLCommandBuffer> cb,
++                             id<MTLBlitCommandEncoder> *blit, id<MTLBuffer> from, NSUInteger offset, NSUInteger row,
++                             HvLinearBacking *backing, BOOL to_guest) {
++    if (!from || !backing || offset > from.length || !row || backing->width_bytes > row ||
++        backing->width_bytes > from.length - offset ||
++        backing->height - 1 > (from.length - offset - backing->width_bytes) / row) return NO;
++    id<MTLBuffer> src = to_guest ? backing->buffer : from, dst = to_guest ? from : backing->buffer;
++    NSUInteger src_offset = to_guest ? 0 : offset, dst_offset = to_guest ? offset : 0;
++    NSUInteger src_row = to_guest ? backing->row : row, dst_row = to_guest ? row : backing->row;
++    BOOL word_aligned = !((src_offset | dst_offset | src_row | dst_row | backing->width_bytes) & 3);
++    if (word_aligned && (backing->height <= 64 || (src_row == dst_row && src_row == backing->width_bytes))) {
++        if (!*blit) *blit = [cb blitCommandEncoder];
++        if (src_row == dst_row && src_row == backing->width_bytes) {
++            [*blit copyFromBuffer:src sourceOffset:src_offset toBuffer:dst destinationOffset:dst_offset size:src_row * backing->height];
++            return YES;
++        }
++        for (NSUInteger y = 0; y < backing->height; y++)
++            [*blit copyFromBuffer:src sourceOffset:src_offset + y * src_row
++                        toBuffer:dst destinationOffset:dst_offset + y * dst_row size:backing->width_bytes];
++        return YES;
++    }
++    [*blit endEncoding];
++    *blit = nil;
++    static id<MTLDevice> pipeline_device;
++    static id<MTLComputePipelineState> pipeline;
++    id<MTLComputePipelineState> state;
++    @synchronized ([HvLinearBacking class]) {
++        if (pipeline_device != device) {
++            NSError *error = nil;
++            NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\n"
++                "kernel void copy_rows(device const uchar *s [[buffer(0)]], device uchar *d [[buffer(1)]], "
++                "constant ulong *p [[buffer(2)]], uint2 q [[thread_position_in_grid]]) { "
++                "ulong x=ulong(q.x)*16; if (x >= p[4] || q.y >= p[5]) return; "
++                "device const uchar *sr=s+p[0]+q.y*p[1]; device uchar *dr=d+p[2]+q.y*p[3]; "
++                "if (((p[0]|p[1]|p[2]|p[3]|p[4]) & 15)==0) "
++                "((device uint4 *)dr)[q.x]=((device const uint4 *)sr)[q.x]; "
++                "else for (uint i=0;i<16 && x+i<p[4];i++) dr[x+i]=sr[x+i]; }";
++            id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
++            pipeline = library ? [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"copy_rows"] error:&error] : nil;
++            if (!pipeline) { fprintf(stderr, "hengevm: pvg-metal: linear row copy pipeline: %s\n", error.localizedDescription.UTF8String); return NO; }
++            pipeline_device = device;
++        }
++        state = pipeline;
++    }
++    uint64_t layout[6] = {src_offset, src_row, dst_offset, dst_row, backing->width_bytes, backing->height};
++    id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
++    [encoder setComputePipelineState:state];
++    [encoder setBuffer:src offset:0 atIndex:0];
++    [encoder setBuffer:dst offset:0 atIndex:1];
++    [encoder setBytes:layout length:sizeof layout atIndex:2];
++    [encoder dispatchThreads:MTLSizeMake((backing->width_bytes + 15) / 16, backing->height, 1)
++      threadsPerThreadgroup:MTLSizeMake(MIN((NSUInteger)256, state.maxTotalThreadsPerThreadgroup), 1, 1)];
++    [encoder endEncoding];
++    return YES;
++}
++/* END LINEAR BACKING */
+ 
+ /* What is known about a made object, so a reused ref is noticed. */
+ @interface HvObject : NSObject {
+@@ -111,6 +191,12 @@
+     HvObject *parent;
+     /* A multi-plane surface's key in the replay's planar table, while it counts as one of its users. */
+     NSString *planar_key;
++    /* A packed guest layout can need aligned host rows. All texture aliases
++       over the same guest bytes share this backing and commit writes to them. */
++    HvLinearBacking *linear;
++    NSData *linear_key;
++    id<MTLBuffer> linear_guest;
++    NSUInteger linear_offset, linear_row;
+ }
+ @end
+ 
+@@ -140,6 +226,7 @@
+     NSMutableDictionary<NSString *, id> *planar;
+     NSMutableDictionary<NSString *, NSNumber *> *planar_uses; /* mappings using each: the entry goes with the last one */
+     NSMutableDictionary<NSString *, NSMutableData *> *planar_hashes; /* and what its planes held when last copied */
++    NSMapTable<NSData *, HvLinearBacking *> *linear_backings;
+     NSMutableSet<NSString *> *complaints;
+     uint64_t execs, draws, failed, heap_bytes, synced, remaps;
+     /* Work the GPU has not finished. Stamps are given back in the order they came: the
+@@ -238,10 +325,12 @@
+     NSUInteger bpp = pixel_bytes(t.pixelFormat);
+     if (!bpp) return YES; /* not checked: as before */
+     NSUInteger align = [device minimumLinearTextureAlignmentForPixelFormat:t.pixelFormat];
+-    BOOL ok = row >= t.width * bpp && (!align || (row % align == 0 && offset % align == 0)) && offset + row * t.height <= length;
++    BOOL bounds = t.width <= UINT64_MAX / bpp && offset <= length && t.width * bpp <= length - offset &&
++        row >= t.width * bpp && row && t.height && t.height - 1 <= (length - offset - t.width * bpp) / row;
++    BOOL ok = bounds && (!align || (row % align == 0 && offset % align == 0));
+     if (!ok) {
+         static int told;
+-        if (told++ < 8) fprintf(stderr, "hengevm: pvg-metal: a %lux%lu format %lu texture can't sit on rows of %llu bytes at %llu in %lu: left empty\n",
++        if (told++ < 8) fprintf(stderr, "hengevm: pvg-metal: a %lux%lu format %lu texture needs aligned backing for rows of %llu bytes at %llu in %lu\n",
+                                 (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, row, offset, (unsigned long)length);
+     }
+     return ok;
+@@ -691,6 +780,62 @@
+     if (!o->object) [self complain:[NSString stringWithFormat:@"texture format %lu %lux%lu failed", (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height]];
+ }
+ 
++/* Physical page identities make mappings of one surface in different guest
++   processes share the same host pixels. A virtual mapping address does not. */
++static NSData *linear_storage_key(HvReplay *r, HvObject *owner, id<MTLBuffer> buffer,
++                                  NSUInteger offset, NSUInteger row, NSUInteger width, NSUInteger height) {
++    uint64_t layout[5] = {row, width, height, offset & 0x3fff, owner->mapped && owner->pages ? 1 : 2};
++    NSMutableData *key = [NSMutableData dataWithBytes:layout length:sizeof layout];
++    if (owner->mapped && owner->pages) {
++        NSUInteger last = offset + (height - 1) * row + width - 1;
++        for (NSUInteger p = offset >> 14; p <= last >> 14; p++) {
++            uint32_t page = owner->pages[p];
++            uint8_t *address = owner->vpage ? (page ? hv_pvg_lite_page(r->lite, page) : NULL) :
++                ((page & 1) ? hv_pvg_lite_phys(r->lite, (uint64_t)(page & ~1u) << 12, 0x4000) : NULL);
++            uintptr_t identity = address ? (uintptr_t)address : (uintptr_t)owner->mapped + (p << 14);
++            [key appendBytes:&identity length:sizeof identity];
++        }
++    } else {
++        uintptr_t identity = (uintptr_t)(__bridge void *)((id)buffer.heap ?: (id)buffer);
++        uint64_t position = offset + (buffer.heap ? buffer.heapOffset : 0);
++        [key appendBytes:&identity length:sizeof identity];
++        [key appendBytes:&position length:sizeof position];
++    }
++    return key;
++}
++
++- (void)bufferTexture:(HvObject *)o owner:(HvObject *)owner buffer:(id<MTLBuffer>)buffer
++           descriptor:(MTLTextureDescriptor *)t offset:(NSUInteger)offset row:(NSUInteger)row {
++    NSUInteger bpp = pixel_bytes(t.pixelFormat);
++    BOOL simple = t.textureType == MTLTextureType2D && t.depth == 1 && t.arrayLength == 1 &&
++        t.mipmapLevelCount == 1 && t.sampleCount == 1 && bpp;
++    BOOL bounds = simple && t.width <= NSUIntegerMax / bpp && offset <= buffer.length && row && t.height &&
++        t.width * bpp <= row && t.width * bpp <= buffer.length - offset &&
++        t.height - 1 <= (buffer.length - offset - t.width * bpp) / row;
++    if (!bounds) {
++        if (linear_texture_fits(device, t, offset, row, buffer.length))
++            o->object = [buffer newTextureWithDescriptor:t offset:offset bytesPerRow:row];
++        return;
++    }
++    o->linear_guest = buffer;
++    o->linear_offset = offset, o->linear_row = row;
++    o->linear_key = linear_storage_key(self, owner, buffer, offset, row, t.width * bpp, t.height);
++    if (!linear_backings) linear_backings = [NSMapTable strongToWeakObjectsMapTable];
++    HvLinearBacking *backing = [linear_backings objectForKey:o->linear_key];
++    if (!backing) {
++        backing = make_linear_backing(device, t.width * bpp, t.height);
++        if (!backing) return;
++        [linear_backings setObject:backing forKey:o->linear_key];
++    }
++    /* Use canonical storage from the first view, even when that particular
++       format could use the guest row directly. The guest can cache Metal
++       resource IDs, so a later alias must not replace an already exposed texture. */
++    MTLTextureDescriptor *description = [t copy];
++    description.resourceOptions = backing->buffer.resourceOptions;
++    o->object = [backing->buffer newTextureWithDescriptor:description offset:0 bytesPerRow:backing->row];
++    o->linear = backing;
++}
++
+ /* A texture over a buffer: {tag 9, size, ref, buffer ref, offset, bytes per row, description}. */
+ - (void)makeLinearTexture:(HvObject *)o at:(uint64_t)at size:(uint32_t)size task:(uint32_t)task {
+     struct __attribute__((packed)) { uint32_t tag, size, ref, buffer; uint64_t offset, row; uint8_t d[64]; } h;
+@@ -729,6 +874,7 @@
+         if (!from) { [self complain:[NSString stringWithFormat:@"view of nothing (tag %u, ref %u)", h.tag, h.buffer]]; return; }
+         o->parent = parent;
+         o->surface = parent->surface;
++        o->follows = parent, o->follows_generation = parent->generation;
+         NSRange levels = NSMakeRange((NSUInteger)v.levels[0], (NSUInteger)v.levels[1]), slices = NSMakeRange((NSUInteger)v.slices[0], (NSUInteger)v.slices[1]);
+         if (h.tag == 7) o->object = [from newTextureViewWithPixelFormat:(MTLPixelFormat)v.format];
+         else if (h.tag == 8) o->object = [from newTextureViewWithPixelFormat:(MTLPixelFormat)v.format textureType:(MTLTextureType)v.type levels:levels slices:slices];
+@@ -754,7 +900,7 @@
+     t.usage |= MTLTextureUsageShaderRead;
+     o->parent = b;
+     o->follows = b, o->follows_generation = b->generation;
+-    if (linear_texture_fits(device, t, h.offset, h.row, buffer.length)) o->object = [buffer newTextureWithDescriptor:t offset:h.offset bytesPerRow:h.row];
++    [self bufferTexture:o owner:b buffer:buffer descriptor:t offset:h.offset row:h.row];
+     if (!o->object) [self complain:[NSString stringWithFormat:@"linear texture format %lu row %llu failed", (unsigned long)t.pixelFormat, h.row]];
+ }
+ 
+@@ -967,6 +1113,9 @@
+         return nil;
+     }
+     surface->mapped = (uint8_t *)base;
++    surface->pages = malloc(n * sizeof *surface->pages);
++    if (!surface->pages) return nil;
++    memcpy(surface->pages, pages, n * sizeof *surface->pages);
+     for (uint64_t i = 0; i < n; i++) {
+         if (!(pages[i] & 1)) continue;
+         uint8_t *src = hv_pvg_lite_phys(lite, (uint64_t)(pages[i] & ~1u) << 12, 0x4000);
+@@ -1095,12 +1244,10 @@
+             o->object = [device newTextureWithDescriptor:t iosurface:surface->iosurface plane:plane];
+         }
+     }
+-    else if (linear_texture_fits(device, t, surface->first, surface->row, ((id<MTLBuffer>)surface->object).length))
+-        o->object = [(id<MTLBuffer>)surface->object newTextureWithDescriptor:t offset:surface->first bytesPerRow:surface->row];
++    else
++        [self bufferTexture:o owner:surface buffer:surface->object descriptor:t offset:surface->first row:surface->row];
+     if (!o->object) {
+         [self complain:[NSString stringWithFormat:@"surface %llu: format %lu row %llu not possible", h.mapping, (unsigned long)t.pixelFormat, surface->row]];
+-        t.storageMode = MTLStorageModePrivate;
+-        o->object = [device newTextureWithDescriptor:t]; /* something to bind: it stays empty */
+     }
+     if (!plane) mapped_textures[@(h.mapping)] = o->object;
+ }
+@@ -1136,6 +1283,7 @@
+         if (o->follows->mapped) refresh_pages(self, task, o->follows);
+         if (o->follows->generation == o->follows_generation) return o;
+     }
++    if (o) o->generation++; /* derived views still retaining it must be rebuilt */
+     o = [HvObject new];
+     memcpy(o->entry, e, 12);
+     objs[@(ref)] = o;
+@@ -2085,6 +2233,11 @@
+ }
+ 
+ /* Returns YES if the GPU's completion gives the stamp back. */
++static HvObject *linear_owner(HvObject *o) {
++    for (; o; o = o->parent) if (o->linear) return o;
++    return nil;
++}
++
+ - (BOOL)exec:(const uint32_t *)a length:(uint32_t)len channel:(uint32_t)ch stamp:(uint32_t)stamp {
+     uint32_t task = a[0], nres = a[1], nbuf = a[2];
+     if (12 + nres * 8ull + nbuf * 16ull > len) { /* never quietly: a lost job is a frame that never gets drawn */
+@@ -2099,6 +2252,8 @@
+     id<MTLCommandBuffer> cb = [queue commandBuffer];
+     id<MTLBlitCommandEncoder> blit = nil;
+     BOOL sync_after = NO;
++    /* Resolve resources and their view parents before encoding transfers. */
++    for (uint32_t i = 0; i < nres; i++) [self object:res[i * 2] task:task];
+     for (uint32_t i = 0; i < nres; i++) {
+         HvObject *o = [self object:res[i * 2] task:task];
+         if (!o) continue;
+@@ -2118,6 +2273,14 @@
+             o->host_valid = YES;
+         }
+         if (res[i * 2 + 1] & 4) sync_after = YES;
++    }
++    NSMutableSet<HvLinearBacking *> *uploaded = [NSMutableSet new];
++    for (uint32_t i = 0; i < nres; i++) {
++        HvObject *o = linear_owner([self object:res[i * 2] task:task]);
++        if (!o || [uploaded containsObject:o->linear]) continue;
++        if (!copy_linear_rows(device, cb, &blit, o->linear_guest, o->linear_offset, o->linear_row, o->linear, NO))
++            [self complain:@"aligned texture upload failed"];
++        [uploaded addObject:o->linear];
+     }
+     [blit endEncoding];
+     /* Bit 1: this exec writes it, so the guest's copy is out of date from here on. Never
+@@ -2193,6 +2356,20 @@
+         if (!more && e) { [e endEncoding]; e = nil; }
+     }
+     if (e) [e endEncoding];
++    /* Publish every GPU write in the original guest layout before returning
++       its completion stamp. Other processes can then map/read these pixels,
++       and the next queued upload cannot overwrite them with an old CPU copy. */
++    id<MTLBlitCommandEncoder> linear_back = nil;
++    NSMutableSet<HvLinearBacking *> *downloaded = [NSMutableSet new];
++    for (uint32_t i = 0; i < nres; i++) {
++        if (!(res[i * 2 + 1] & 2)) continue;
++        HvObject *o = linear_owner([self object:res[i * 2] task:task]);
++        if (!o || [downloaded containsObject:o->linear]) continue;
++        if (!copy_linear_rows(device, cb, &linear_back, o->linear_guest, o->linear_offset, o->linear_row, o->linear, YES))
++            [self complain:@"aligned texture writeback failed"];
++        [downloaded addObject:o->linear];
++    }
++    [linear_back endEncoding];
+     if (sync_after) { /* the guest wants these back as soon as this is done */
+         id<MTLBlitCommandEncoder> back = nil;
+         for (uint32_t i = 0; i < nres; i++) {

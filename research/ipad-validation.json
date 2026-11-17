@@ -1,0 +1,56 @@
+{
+  "date_local": "2026-11-15",
+  "device": "iPad Pro 13-inch (M5), iPad17,4",
+  "host_os": "iPadOS 26.3.1 (a)",
+  "utm": {
+    "installed": true,
+    "bundle_identifier": "com.thomas20090425.research.UTM",
+    "guest_execution_verified": false
+  },
+  "henge": {
+    "installed": true,
+    "bundle_identifier": "com.thomas20090425.henge",
+    "jit_cache_mib": 512,
+    "jit_generated_code_return": 42,
+    "debugger_detached": true,
+    "guest": "macOS Sequoia 15.6.1 24G90",
+    "restore_step": 100,
+    "restore_result": 0,
+    "guest_ram_mib": 6144,
+    "vcpus": 4,
+    "display": "1920x1440",
+    "metal_pvg_rendering_observed": true,
+    "setup_assistant_observed": true,
+    "local_account_created": false,
+    "user_requested_manual_account_setup": true,
+    "automatic_commands_cleared": true,
+    "later_running_session_ram_mib": 8192,
+    "later_running_session_evidence": "build/henge-active-review/henge-research-status.json and henge.log",
+    "manual_account_setup_completed_observed": true,
+    "user_benchmark_running_observed": true,
+    "agent_created_account": false
+  },
+  "windows_controls": {
+    "signed_build_passed": true,
+    "settings_pages": 9,
+    "installed_update": false,
+    "reason": "Original Windows guest reports an active session; preserve unsaved state."
+  },
+  "architecture": "One UTM frontend app with isolated WindowsBackend and HengeBackend frameworks now compiles; device runtime remains unverified. Earlier standalone apps remain baseline references.",
+  "unified": {
+    "bundle_identifier": "com.thomas20090425.unifiedresearch.UTM",
+    "baseline_signed_build_passed": true,
+    "baseline_ipa_sha256": "e8e413fcf265c5bf1f61ea8e61f7970c7ad12ee8d4335ea432341a524f0bf04a",
+    "baseline_artifact": "distribution/unified-baseline/UTM.app",
+    "installed": false,
+    "guest_execution_verified": false,
+    "pending": "User confirms the running Henge/Geekbench guest has shut down before installing and verifying the unified app.",
+    "final_signed_build_passed": true,
+    "ipa_sha256": "60779822a7c989bc1182576ffd26d4b071d4f49b7093b251e3cdb0f83bc0d026",
+    "artifact": "distribution/unified/UTM.app",
+    "native_configuration_checks_passed": true,
+    "input_checks_passed": true,
+    "metal_api_validation_checks_passed": true,
+    "metal_test_host": "Apple M3"
+  }
+}

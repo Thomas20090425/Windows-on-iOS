@@ -1,5 +1,17 @@
 # WindowsiOS verification report
 
+Latest unified-app evidence (2026-11-15): **UTM ARM Lab** builds and signs with
+the actual UTM frontend and both native engine frameworks. IPA SHA-256:
+`60779822a7c989bc1182576ffd26d4b071d4f49b7093b251e3cdb0f83bc0d026`.
+Strict signatures, memory-profile grants, isolated native exports and exact
+embedded-module JIT symbols pass. Native machine import/save/error-path tests,
+input normalization checks and the real Metal aligned-texture harness pass.
+The latter covers the small BGRA8/RGBA16F layouts rejected in the device log,
+real rendering/aliasing, successive writes and full-size half-float output.
+These checks establish the implementation and build; the unified app has not
+yet run a guest on the iPad. The user's active Henge/Geekbench session was
+preserved. See [full evidence and remaining device work](docs/UNIFIED_UTM.md).
+
 Date: **2026-11-15**, America/Toronto. Target: **Windows 11 24H2 ARM64**,
 confirmed by the user. Canonical branch: `main`; the implementation was
 developed on `codex/ipad-24h2-build`; integration is recorded in
@@ -10,14 +22,94 @@ and the software TPM/input plus networking, CPU identity and VirtIO display upda
 
 ## Verification scope
 
-The user explicitly limited work to making the application build and prohibited
+For the earlier Windows work, the user explicitly limited work to making the application build and prohibited
 tests/debugging/VM execution on this Mac. After that instruction, verification
 was limited to compilation, source inspection and artifact packaging/signature
 inspection. No simulator, app, guest, debugger or performance workload was run.
 Baseline core regression checks had already completed before that instruction;
 they do not validate the subsequently added app/device changes.
 
-### Latest display and keyboard correction
+The later UTM/macOS research request explicitly authorized device installation,
+JIT, Apple IPSW download and guest restore/execution. Source-built full UTM and
+Henge are installed on the M5 iPad; Henge's 512 MiB JIT RX self-test returned 42,
+the Apple Sequoia 15.6.1 restore returned 0 / step 100, and the new 6 GiB guest booted
+to animated Setup Assistant through the Metal/PVG renderer. The user chose to
+complete account setup, so no account was created and the command queue was
+cleared. These are actual research runtime results, separate from the older
+Windows build-only evidence below. See [complete research record](docs/VIRTUALIZATION_RESEARCH.md).
+
+WindowsiOS's nine settings pages, notes/search and Engines hub built in signed
+Release (`build/logs/utm-style-windows-app-build.log`). Its installed original
+Windows guest reports running; the update was staged to preserve that session.
+UTM's app installation is verified, but its guest execution is untested here.
+
+### RAM reservation rejection correction
+
+The user reported failure even at 4 GiB in the original Windows 11 app. A
+read-only installed-app listing confirmed `me.ammaar.windowsios`; the existing
+device `Documents/boot_status.txt` was copied to
+`build/ipad-memory-failure-status.txt`. It shows JIT live, 0 MiB reserved guest
+RAM and 4698 MiB remaining process allowance. The old check required 5120 MiB
+for a 4096 MiB guest and ran before the available file-backed allocator.
+
+The corrected flow reserves exact guest bytes before process-global engine
+creation, checks engine headroom separately and uses a fully allocated unique
+temporary backing file when the special ledger mapping is unavailable. File
+storage is reserved with F_PREALLOCATE/F_ALLOCATEALL, mapped lazily and
+unlinked; actual allocation failures stop cleanly without an anonymous
+fallback. Changed sizes replace old reservations only after success, permitting
+retries before engine creation. Both signed app identities receive this fix.
+
+Read-only device metadata/status inspection did not launch the app, a VM or a
+debugger. No allocation or guest execution was performed by the agent.
+
+Both corrected Release variants compiled with two workers, Xcode 27.2 / SDK
+27.2. Signature/profile checks, IPA archive integrity and matching local JIT
+symbol extraction passed:
+
+| Variant | Build log | IPA SHA-256 |
+| --- | --- | --- |
+| Original ID, optional capabilities omitted | `build/logs/reservation-fixed-original-build.log` | `3ac81d86c5b36fb4d5de1e346b2e0b6e124ebc8fa14b367e1f2d8d55e10ae01d` |
+| Windows 11 RAM, both capabilities granted | `build/logs/reservation-fixed-memory-build.log` | `51e042ec749352931a4e93259a963b24001d6f5081bb27bd64d1fa086686abbf` |
+
+The first output is under `distribution/reservation-fixed-original/`, with
+bundle ID `me.ammaar.windowsios`; the second replaces the earlier build under
+`distribution/memory-enabled/`. No package was installed by the agent and no
+4/6/8 GiB guest allocation was executed. Actual VA mapping, storage reservation
+and guest working-set behavior remain unverified on the iPad.
+
+### Earlier memory-capability build
+
+The user identified their iPad as **iPad Pro (M5), 2 TB, 16 GB RAM**. The existing
+physical admission formula already permits approximately 13 GiB on a 16 GiB
+host; it does not explain a roughly 5 GiB allocation failure. Process memory
+allowance, reservation failure and reservation-size mismatch now have separate
+diagnostics and startup errors. iOS no longer eagerly touches every page of
+the file-backed fallback at startup, and RAM metadata allocation failure now
+stops startup.
+
+The source recipe requests Increased Memory Limit and Extended Virtual
+Addressing. Apple refused the original `me.ammaar.windowsios` registration for
+this Mac's team, so the signed variant uses **com.thomas20090425.windowsios**
+and display name **Windows 11 RAM**. Its explicit embedded provisioning profile
+and app signature both contain both entitlements with value true. These grants
+request device-dependent allowances; they do not prove 8 GiB guest execution.
+
+Signed Release compilation succeeded with Xcode 27.2 / SDK 27.2 and two
+workers: `build/logs/memory-enabled-build.log`. App signature and IPA integrity
+passed; local JIT symbols were generated into `build/jit-symbols-memory-release.json`.
+The previous distribution IPA hash was checked unchanged. New outputs are
+under `distribution/memory-enabled/`; its IPA SHA-256 is:
+
+```text
+38570d3f349455972b13200a1b962d3d4a9da07e69a2d97b96269dd2fdee452d
+```
+
+No iPad installation, migration, guest allocation, app/VM/debugger/simulator
+execution or tests were run. A separate app identifier requires the owner to
+copy the complete existing VM folder into its new container before reuse.
+
+### Display and keyboard correction
 
 The user reported a fixed 800×600 desktop alongside the adjustable native
 VirtIO screen. The bundled driver installer now installs a CCD display helper
@@ -39,7 +131,7 @@ verification and IPA archive integrity passed. Bundled helper source hashes
 match provenance; generated and bundled driver disks match its image hash.
 Local JIT symbol metadata was regenerated from the resulting app.
 
-Latest IPA SHA-256:
+Earlier display/keyboard IPA SHA-256 (preserved at the original path):
 
 ```text
 1b641afd3f5d983b3e481b083368b351ac7f3d30a3b19a20543c76d325ed97dd

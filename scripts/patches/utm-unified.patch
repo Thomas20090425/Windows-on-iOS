@@ -1,0 +1,956 @@
+diff --git a/Configuration/UTMConfiguration.swift b/Configuration/UTMConfiguration.swift
+index abfe347..75327f7 100644
+--- a/Configuration/UTMConfiguration.swift
++++ b/Configuration/UTMConfiguration.swift
+@@ -44,6 +44,7 @@ enum UTMBackend: String, CaseIterable, Codable {
+     case unknown = "Unknown"
+     case apple = "Apple"
+     case qemu = "QEMU"
++    case nativeARM64 = "NativeARM64"
+ }
+ 
+ enum UTMConfigurationError: Error {
+@@ -126,6 +127,12 @@ extension UTMConfiguration {
+         } else if stub.backend == .qemu {
+             // QEMU configuration
+             return try decoder.decode(UTMQemuConfiguration.self, from: configData)
++        } else if stub.backend == .nativeARM64 {
++            #if os(iOS) && WITH_NATIVE_ENGINES
++            return try decoder.decode(UTMNativeConfiguration.self, from: configData)
++            #else
++            throw UTMConfigurationError.invalidBackend
++            #endif
+         } else if stub.backend == .apple {
+             // Apple configuration
+             #if os(macOS)
+diff --git a/Platform/Shared/VMDetailsView.swift b/Platform/Shared/VMDetailsView.swift
+index 3944c03..1f0008a 100644
+--- a/Platform/Shared/VMDetailsView.swift
++++ b/Platform/Shared/VMDetailsView.swift
+@@ -89,6 +89,11 @@ struct VMDetailsView: View {
+             .modifier(VMOptionalNavigationTitleModifier(vm: vm))
+             .modifier(VMToolbarModifier(vm: vm, bottom: !regularScreenSizeClass))
+             .sheet(isPresented: $data.showSettingsModal, onDismiss: refreshSize) {
++                #if os(iOS) && WITH_NATIVE_ENGINES
++                if let nativeConfig = vm.config as? UTMNativeConfiguration {
++                    UTMNativeSettingsView(vm: vm, config: nativeConfig).environmentObject(data)
++                }
++                #endif
+                 if let qemuConfig = vm.config as? UTMQemuConfiguration {
+                     VMSettingsView(vm: vm, config: qemuConfig)
+                         .environmentObject(data)
+diff --git a/Platform/Shared/VMWizardStartView.swift b/Platform/Shared/VMWizardStartView.swift
+index 5832cd7..5df0837 100644
+--- a/Platform/Shared/VMWizardStartView.swift
++++ b/Platform/Shared/VMWizardStartView.swift
+@@ -40,6 +40,20 @@ struct VMWizardStartView: View {
+     
+     var body: some View {
+         VMWizardContent("Start") {
++            #if os(iOS) && WITH_NATIVE_ENGINES
++            Section {
++                NavigationLink(destination: UTMNativeCreateView(engine: .windows)) {
++                    Label("Windows ARM64", systemImage: "pc")
++                }
++                NavigationLink(destination: UTMNativeCreateView(engine: .macOS)) {
++                    Label("macOS ARM64", systemImage: "laptopcomputer")
++                }
++            } header: {
++                Text("ARM64 Software Engines")
++            } footer: {
++                Text("Use the Windows translator or Henge macOS engine inside this app. QEMU machines and their complete UTM settings remain available below.")
++            }
++            #endif
+             Section {
+                 let virtButton = Button {
+                     wizardState.useVirtualization = true
+diff --git a/Platform/UTMData.swift b/Platform/UTMData.swift
+index 7be0d4b..010ba41 100644
+--- a/Platform/UTMData.swift
++++ b/Platform/UTMData.swift
+@@ -442,6 +442,11 @@ enum AlertItem: Identifiable {
+     /// Save an existing VM to disk
+     /// - Parameter vm: VM to save
+     func save(vm: VMData) async throws {
++        #if os(iOS) && WITH_NATIVE_ENGINES
++        if vm.config is UTMNativeConfiguration, !vm.isModifyAllowed {
++            throw UTMNativeError.message("Close and reopen the app before modifying a machine whose native engine has been initialized.")
++        }
++        #endif
+         do {
+             try await vm.save()
+             #if WITH_SERVER
+@@ -507,6 +512,11 @@ enum AlertItem: Identifiable {
+     /// - Parameter vm: VM to delete
+     /// - Returns: Index of item removed in VM list or nil if not in list
+     @discardableResult func delete(vm: VMData, alsoRegistry: Bool = true) async throws -> Int? {
++        #if os(iOS) && WITH_NATIVE_ENGINES
++        if vm.config is UTMNativeConfiguration, !vm.isModifyAllowed {
++            throw UTMNativeError.message("Close and reopen the app before deleting this native machine. Its engine still owns the guest files.")
++        }
++        #endif
+         if vm.isLoaded {
+             try fileManager.removeItem(at: vm.pathUrl)
+         }
+@@ -524,6 +534,11 @@ enum AlertItem: Identifiable {
+     /// - Parameter vm: VM to clone
+     /// - Returns: The new VM
+     @discardableResult func clone(vm: VMData) async throws -> VMData {
++        #if os(iOS) && WITH_NATIVE_ENGINES
++        if vm.config is UTMNativeConfiguration, !vm.isModifyAllowed {
++            throw UTMNativeError.message("Close and reopen the app before cloning this machine so its disk, NVRAM and TPM state are copied consistently.")
++        }
++        #endif
+         let newName: String = newDefaultVMName(base: vm.detailsTitleLabel)
+         let newPath = ConcreteVirtualMachine.virtualMachinePath(for: newName, in: documentsURL)
+         let isRegenerateMACOnClone = UserDefaults.standard.bool(forKey: "IsRegenerateMACOnClone")
+@@ -564,6 +579,11 @@ enum AlertItem: Identifiable {
+     ///   - vm: VM to copy
+     ///   - url: Location to copy to (must be writable)
+     func export(vm: VMData, to url: URL) async throws {
++        #if os(iOS) && WITH_NATIVE_ENGINES
++        if vm.config is UTMNativeConfiguration, !vm.isModifyAllowed {
++            throw UTMNativeError.message("Close and reopen the app before exporting this machine so its disk, NVRAM and TPM state are copied consistently.")
++        }
++        #endif
+         let sourceUrl = vm.pathUrl
+         if fileManager.fileExists(atPath: url.path) {
+             try fileManager.removeItem(at: url)
+diff --git a/Platform/VMData.swift b/Platform/VMData.swift
+index fb70720..6aab67c 100644
+--- a/Platform/VMData.swift
++++ b/Platform/VMData.swift
+@@ -137,6 +137,11 @@ import SwiftUI
+     /// - Parameter config: Configuration to create new VM
+     convenience init<Config: UTMConfiguration>(creatingFromConfig config: Config, destinationUrl: URL) throws {
+         self.init()
++        #if os(iOS) && WITH_NATIVE_ENGINES
++        if let nativeConfig = config as? UTMNativeConfiguration {
++            wrapped = try UTMNativeVirtualMachine(newForConfiguration: nativeConfig, destinationUrl: destinationUrl)
++        }
++        #endif
+         #if !WITH_REMOTE
+         if let qemuConfig = config as? UTMQemuConfiguration {
+             wrapped = try UTMQemuVirtualMachine(newForConfiguration: qemuConfig, destinationUrl: destinationUrl)
+@@ -170,6 +175,11 @@ import SwiftUI
+         }
+         var loaded: (any UTMVirtualMachine)?
+         let config = try UTMQemuConfiguration.load(from: url)
++        #if os(iOS) && WITH_NATIVE_ENGINES
++        if let nativeConfig = config as? UTMNativeConfiguration {
++            loaded = try UTMNativeVirtualMachine(packageUrl: url, configuration: nativeConfig, isShortcut: isShortcut(url))
++        }
++        #endif
+         #if !WITH_REMOTE
+         if let qemuConfig = config as? UTMQemuConfiguration {
+             loaded = try UTMQemuVirtualMachine(packageUrl: url, configuration: qemuConfig, isShortcut: isShortcut(url))
+@@ -231,6 +241,11 @@ import SwiftUI
+                 self?.objectWillChange.send()
+             })
+         }
++        #if os(iOS) && WITH_NATIVE_ENGINES
++        if let nativeConfig = wrapped?.config as? UTMNativeConfiguration {
++            s.append(nativeConfig.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() })
++        }
++        #endif
+         #if os(macOS)
+         if let appleConfig = wrapped?.config as? UTMAppleConfiguration {
+             s.append(appleConfig.objectWillChange.sink { [weak self] _ in
+@@ -313,7 +328,10 @@ extension VMData {
+     
+     /// VM can be modified
+     var isModifyAllowed: Bool {
+-        state == .stopped
++        #if os(iOS) && WITH_NATIVE_ENGINES
++        if let native = wrapped as? UTMNativeVirtualMachine { return native.isConfigurationEditable }
++        #endif
++        return state == .stopped
+     }
+     
+     /// Display VM as "busy" for UI elements
+@@ -363,6 +381,9 @@ extension VMData {
+     
+     /// Display VM target system for UI elements
+     var detailsSystemTargetLabel: String {
++        #if os(iOS) && WITH_NATIVE_ENGINES
++        if let native = config as? UTMNativeConfiguration { return native.engine.detail }
++        #endif
+         if let qemuConfig = config as? UTMQemuConfiguration {
+             return qemuConfig.system.target.prettyValue
+         }
+@@ -376,6 +397,9 @@ extension VMData {
+     
+     /// Display VM architecture for UI elements
+     var detailsSystemArchitectureLabel: String {
++        #if os(iOS) && WITH_NATIVE_ENGINES
++        if config is UTMNativeConfiguration { return "ARM64" }
++        #endif
+         if let qemuConfig = config as? UTMQemuConfiguration {
+             return qemuConfig.system.architecture.prettyValue
+         }
+@@ -390,6 +414,11 @@ extension VMData {
+     /// Display RAM (formatted) for UI elements
+     var detailsSystemMemoryLabel: String {
+         let bytesInMib = Int64(1048576)
++        #if os(iOS) && WITH_NATIVE_ENGINES
++        if let native = config as? UTMNativeConfiguration {
++            return ByteCountFormatter.string(fromByteCount: Int64(native.memoryMiB) * bytesInMib, countStyle: .binary)
++        }
++        #endif
+         if let qemuConfig = config as? UTMQemuConfiguration {
+             return ByteCountFormatter.string(fromByteCount: Int64(qemuConfig.system.memorySize) * bytesInMib, countStyle: .binary)
+         }
+diff --git a/Platform/iOS/UTMApp.swift b/Platform/iOS/UTMApp.swift
+index de0ef83..5816688 100644
+--- a/Platform/iOS/UTMApp.swift
++++ b/Platform/iOS/UTMApp.swift
+@@ -43,6 +43,9 @@ struct UTMApp: App {
+         WindowGroup(id: Self.windowID) {
+             UTMSingleWindowView(data: data)
+                 .externalDisplayAccessory()
++                #if WITH_NATIVE_ENGINES
++                .onAppear { UTMUnifiedEngineLease.prepareRequestedJIT() }
++                #endif
+         }.commands {
+             VMCommands()
+         }
+diff --git a/Platform/iOS/UTMDataExtension.swift b/Platform/iOS/UTMDataExtension.swift
+index fe4fb72..9090737 100644
+--- a/Platform/iOS/UTMDataExtension.swift
++++ b/Platform/iOS/UTMDataExtension.swift
+@@ -28,6 +28,25 @@ extension UTMData {
+         guard let wrapped = vm.wrapped else {
+             return
+         }
++        #if os(iOS) && WITH_NATIVE_ENGINES
++        if let native = wrapped as? UTMNativeVirtualMachine {
++            guard VMSessionState.allActiveSessions.isEmpty else {
++                showErrorAlert(message: "Stop the current QEMU session and reopen the app before starting an ARM64 engine.")
++                return
++            }
++            Task { @MainActor in
++                do {
++                    try await native.start(options: options)
++                    try native.presentSession()
++                } catch {
++                    showErrorAlert(message: error.localizedDescription)
++                }
++            }
++            return
++        }
++        do { try UTMUnifiedEngineLease.claimQEMU() }
++        catch { showErrorAlert(message: error.localizedDescription); return }
++        #endif
+         if let session = VMSessionState.allActiveSessions.values.first(where: { $0.vm.id == wrapped.id }) {
+             session.showWindow()
+         } else if vm.isStopped || vm.isTakeoverAllowed {
+diff --git a/Platform/Native/UTMNativeConfiguration.swift b/Platform/Native/UTMNativeConfiguration.swift
+new file mode 100644
+index 0000000..d354db4
+--- /dev/null
++++ b/Platform/Native/UTMNativeConfiguration.swift
+@@ -0,0 +1,224 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#if os(iOS)
++import Combine
++import Foundation
++
++enum UTMNativeEngine: String, Codable, CaseIterable, Identifiable {
++    case windows = "WindowsARM64"
++    case macOS = "macOSARM64"
++
++    var id: String { rawValue }
++    var title: String { self == .windows ? "Windows ARM64" : "macOS ARM64" }
++    var detail: String { self == .windows ? "Windows ARM64 translator" : "Henge macOS emulator" }
++    var maximumCPUs: Int { self == .windows ? 4 : 6 }
++    var mediaName: String { self == .windows ? "installer.iso" : "restore.ipsw" }
++}
++
++struct UTMNativeDrive: UTMConfigurationDrive {
++    var imageName: String?
++    var sizeMib: Int = 65536
++    var isReadOnly = false
++    var isExternal = false
++    var isRawImage: Bool { true }
++    var imageURL: URL?
++    var id = UUID().uuidString
++
++    enum CodingKeys: String, CodingKey { case imageName, sizeMib, isReadOnly, isExternal, id }
++    func clone() -> UTMNativeDrive {
++        var copy = self
++        copy.id = UUID().uuidString
++        return copy
++    }
++}
++
++final class UTMNativeConfiguration: UTMConfiguration {
++    @Published var information = UTMConfigurationInfo()
++    @Published var engine: UTMNativeEngine
++    @Published var memoryMiB = 4096
++    @Published var cpuCount = 4
++    @Published var diskSizeGiB = 64
++    @Published var networkEnabled = true
++    @Published var audioEnabled = true
++    @Published var displayWidth = 1920
++    @Published var displayHeight = 1200
++    @Published var drives: [UTMNativeDrive] = []
++    var backend: UTMBackend { .nativeARM64 }
++    var maximumMemoryMiB: Int {
++        min(16 * 1024, max(0, Int(ProcessInfo.processInfo.physicalMemory >> 20) - 3072))
++    }
++    @Published var mediaImportURL: URL?
++    @Published var machineImportURL: URL?
++
++    private enum CodingKeys: String, CodingKey {
++        case backend = "Backend", version = "ConfigurationVersion", information = "Information"
++        case engine = "Engine", memoryMiB = "MemoryMiB", cpuCount = "CPUCount", diskSizeGiB = "DiskSizeGiB"
++        case networkEnabled = "NetworkEnabled", audioEnabled = "AudioEnabled"
++        case displayWidth = "DisplayWidth", displayHeight = "DisplayHeight", drives = "Drives"
++    }
++
++    init(engine: UTMNativeEngine) {
++        self.engine = engine
++        information.name = engine.title
++        information.iconURL = UTMConfigurationInfo.builtinIcon(named: engine == .windows ? "windows" : "mac")
++    }
++
++    required init(from decoder: Decoder) throws {
++        let values = try decoder.container(keyedBy: CodingKeys.self)
++        let version = try values.decode(Int.self, forKey: .version)
++        guard version >= Self.oldestVersion else { throw UTMConfigurationError.versionTooLow }
++        guard version <= Self.currentVersion else { throw UTMConfigurationError.versionTooHigh }
++        guard try values.decode(UTMBackend.self, forKey: .backend) == .nativeARM64 else { throw UTMConfigurationError.invalidBackend }
++        engine = try values.decode(UTMNativeEngine.self, forKey: .engine)
++        information = try values.decode(UTMConfigurationInfo.self, forKey: .information)
++        memoryMiB = try values.decode(Int.self, forKey: .memoryMiB)
++        cpuCount = try values.decode(Int.self, forKey: .cpuCount)
++        diskSizeGiB = try values.decode(Int.self, forKey: .diskSizeGiB)
++        networkEnabled = try values.decodeIfPresent(Bool.self, forKey: .networkEnabled) ?? true
++        audioEnabled = try values.decodeIfPresent(Bool.self, forKey: .audioEnabled) ?? true
++        displayWidth = try values.decodeIfPresent(Int.self, forKey: .displayWidth) ?? 1920
++        displayHeight = try values.decodeIfPresent(Int.self, forKey: .displayHeight) ?? 1200
++        drives = try values.decodeIfPresent([UTMNativeDrive].self, forKey: .drives) ?? []
++        try validate()
++    }
++
++    func encode(to encoder: Encoder) throws {
++        var values = encoder.container(keyedBy: CodingKeys.self)
++        try values.encode(backend, forKey: .backend)
++        try values.encode(Self.currentVersion, forKey: .version)
++        try values.encode(information, forKey: .information)
++        try values.encode(engine, forKey: .engine)
++        try values.encode(memoryMiB, forKey: .memoryMiB)
++        try values.encode(cpuCount, forKey: .cpuCount)
++        try values.encode(diskSizeGiB, forKey: .diskSizeGiB)
++        try values.encode(networkEnabled, forKey: .networkEnabled)
++        try values.encode(audioEnabled, forKey: .audioEnabled)
++        try values.encode(displayWidth, forKey: .displayWidth)
++        try values.encode(displayHeight, forKey: .displayHeight)
++        try values.encode(drives, forKey: .drives)
++    }
++
++    func validate() throws {
++        guard maximumMemoryMiB >= 4096, memoryMiB >= 4096, memoryMiB <= maximumMemoryMiB else {
++            throw UTMNativeError.message("Choose between 4096 and \(maximumMemoryMiB) MiB RAM for this device. The engine still needs a usable allocation at startup.")
++        }
++        guard !information.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
++              information.name.count <= 100,
++              (1...engine.maximumCPUs).contains(cpuCount),
++              (64...512).contains(diskSizeGiB),
++              (640...4095).contains(displayWidth), (480...4095).contains(displayHeight) else {
++            throw UTMNativeError.message("Choose a name, a supported CPU count and a valid display size.")
++        }
++    }
++
++    @MainActor func prepareSave(for packageURL: URL) async throws { try validate() }
++
++    @MainActor func saveData(to dataURL: URL) async throws -> [URL] {
++        let manager = FileManager.default
++        if let source = machineImportURL {
++            let scoped = source.startAccessingSecurityScopedResource()
++            defer { if scoped { source.stopAccessingSecurityScopedResource() } }
++            try await importMachine(from: source, to: dataURL)
++            machineImportURL = nil
++        }
++        if let source = mediaImportURL {
++            let expectedExtension = engine == .windows ? "iso" : "ipsw"
++            guard source.pathExtension.lowercased() == expectedExtension else {
++                throw UTMNativeError.message("Choose a .\(expectedExtension) installation image for this engine.")
++            }
++            let scoped = source.startAccessingSecurityScopedResource()
++            defer { if scoped { source.stopAccessingSecurityScopedResource() } }
++            let destination = dataURL.appendingPathComponent(engine.mediaName)
++            if source.standardizedFileURL != destination.standardizedFileURL {
++                let staging = dataURL.appendingPathComponent(".media-\(UUID().uuidString)")
++                defer { try? manager.removeItem(at: staging) }
++                try await Task.detached { try FileManager.default.copyItem(at: source, to: staging) }.value
++                if manager.fileExists(atPath: destination.path) {
++                    _ = try manager.replaceItemAt(destination, withItemAt: staging)
++                } else {
++                    try manager.moveItem(at: staging, to: destination)
++                }
++            }
++            mediaImportURL = nil
++        }
++        _ = try await information.saveData(to: dataURL)
++        // Native engines own NVRAM, TPM, restore state and additional files here.
++        // All of them must survive the generic UTM bundle cleanup operation.
++        return try manager.contentsOfDirectory(at: dataURL, includingPropertiesForKeys: nil)
++    }
++
++    @MainActor private func importMachine(from source: URL, to dataURL: URL) async throws {
++        let manager = FileManager.default
++        let sourcePath = source.resolvingSymlinksInPath().standardizedFileURL.path
++        let destinationPath = dataURL.resolvingSymlinksInPath().standardizedFileURL.path
++        guard !destinationPath.hasPrefix(sourcePath + "/"), sourcePath != destinationPath else {
++            throw UTMNativeError.message("Choose an existing machine folder outside this new UTM bundle.")
++        }
++        if engine == .windows {
++            guard manager.fileExists(atPath: source.appendingPathComponent("vars.fd").path),
++                  manager.fileExists(atPath: source.appendingPathComponent("windows11.img").path) ||
++                  manager.fileExists(atPath: source.appendingPathComponent("windows11.hvsparse").path) else {
++                throw UTMNativeError.message("Choose the complete Windows machine folder containing its disk, vars.fd and TPM state.")
++            }
++            if manager.fileExists(atPath: source.appendingPathComponent("tpm-state-initialized").path) {
++                guard manager.fileExists(atPath: source.appendingPathComponent("TPM/identity").path),
++                      manager.fileExists(atPath: source.appendingPathComponent("TPM/permall").path) else {
++                    throw UTMNativeError.message("This Windows machine's TPM binding marker exists but its TPM identity or permanent state is missing. Import its complete backup together.")
++                }
++            }
++        } else {
++            guard manager.fileExists(atPath: source.appendingPathComponent("disk.img").path),
++                  manager.fileExists(atPath: source.appendingPathComponent("auxiliary.bin").path),
++                  manager.fileExists(atPath: source.appendingPathComponent("AVPBooter.vmapple2.bin").path),
++                  manager.fileExists(atPath: source.appendingPathComponent("machine.json").path) else {
++                throw UTMNativeError.message("Choose a complete Henge machine folder containing disk.img, auxiliary.bin, its boot ROM and machine.json identity.")
++            }
++            struct MacIdentity: Decodable { let ecid: UInt64 }
++            guard let identity = try? JSONDecoder().decode(MacIdentity.self, from: Data(contentsOf: source.appendingPathComponent("machine.json"))),
++                  identity.ecid != 0 else {
++                throw UTMNativeError.message("The Henge machine.json identity is unreadable. Its existing identity must be preserved to boot this disk.")
++            }
++        }
++        guard try manager.contentsOfDirectory(atPath: dataURL.path).isEmpty else {
++            throw UTMNativeError.message("A prepared machine can only be imported into an empty new bundle.")
++        }
++        let staging = dataURL.deletingLastPathComponent().appendingPathComponent(".native-import-\(UUID().uuidString)")
++        defer { try? manager.removeItem(at: staging) }
++        try await Task.detached {
++            guard let enumerator = FileManager.default.enumerator(at: source, includingPropertiesForKeys: [.isSymbolicLinkKey]) else {
++                throw UTMNativeError.message("The selected machine folder cannot be read.")
++            }
++            for case let item as URL in enumerator {
++                if try item.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true {
++                    throw UTMNativeError.message("Machine folders containing symbolic links cannot be imported.")
++                }
++            }
++            try FileManager.default.copyItem(at: source, to: staging)
++        }.value
++        if engine == .macOS {
++            try manager.moveItem(at: staging, to: dataURL.appendingPathComponent("Henge"))
++        } else {
++            try manager.removeItem(at: dataURL) // Empty directory belonging to the new bundle.
++            try manager.moveItem(at: staging, to: dataURL)
++        }
++    }
++
++    func engineConfiguration(for packageURL: URL) -> NSDictionary {
++        let media = packageURL.appendingPathComponent("Data").appendingPathComponent(engine.mediaName)
++        var values: [String: Any] = [
++            "name": information.name, "uuid": information.uuid.uuidString,
++            "backend": engine.rawValue, "memoryMiB": memoryMiB, "cpuCount": cpuCount,
++            "diskSizeGiB": diskSizeGiB, "networkEnabled": networkEnabled,
++            "audioEnabled": audioEnabled, "displayWidth": displayWidth, "displayHeight": displayHeight
++        ]
++        if FileManager.default.fileExists(atPath: media.path) { values["installationMediaPath"] = media.path }
++        return values as NSDictionary
++    }
++}
++
++enum UTMNativeError: LocalizedError {
++    case message(String)
++    var errorDescription: String? {
++        switch self { case .message(let message): return message }
++    }
++}
++#endif
+diff --git a/Platform/Native/UTMNativeSettingsView.swift b/Platform/Native/UTMNativeSettingsView.swift
+new file mode 100644
+index 0000000..471811a
+--- /dev/null
++++ b/Platform/Native/UTMNativeSettingsView.swift
+@@ -0,0 +1,221 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#if os(iOS)
++import SwiftUI
++import UniformTypeIdentifiers
++
++struct UTMNativeSettingsView: View {
++    let vm: VMData
++    @ObservedObject var config: UTMNativeConfiguration
++    @EnvironmentObject private var data: UTMData
++    @Environment(\.presentationMode) private var presentationMode
++
++    var body: some View {
++        NavigationView {
++            Form {
++                UTMNativeConfigurationFields(config: config, packageURL: vm.pathUrl, permitsMachineImport: false)
++            }
++            .navigationTitle("Settings")
++            .toolbar {
++                ToolbarItem(placement: .cancellationAction) {
++                    Button("Cancel") {
++                        presentationMode.wrappedValue.dismiss()
++                        data.busyWork { try data.discardChanges(for: vm) }
++                    }
++                }
++                ToolbarItem(placement: .confirmationAction) {
++                    Button("Save") {
++                        data.busyWorkAsync {
++                            try await data.save(vm: vm)
++                            await MainActor.run { presentationMode.wrappedValue.dismiss() }
++                        }
++                    }
++                }
++            }
++        }
++        .navigationViewStyle(.stack)
++        .disabled(data.busy)
++        .overlay(BusyOverlay())
++    }
++}
++
++struct UTMNativeCreateView: View {
++    @StateObject private var config: UTMNativeConfiguration
++    @EnvironmentObject private var data: UTMData
++
++    init(engine: UTMNativeEngine) {
++        _config = StateObject(wrappedValue: UTMNativeConfiguration(engine: engine))
++    }
++
++    private var canCreate: Bool {
++        (try? config.validate()) != nil &&
++        (config.engine == .macOS || config.mediaImportURL != nil || config.machineImportURL != nil)
++    }
++
++    var body: some View {
++        Form {
++            Section {
++                Label(config.engine.detail, systemImage: config.engine == .windows ? "pc" : "laptopcomputer")
++                Text("This engine runs ARM64 code through software translation. Hardware virtualization is not used on this iPad.")
++                    .font(.caption).foregroundStyle(.secondary)
++            }
++            UTMNativeConfigurationFields(config: config, packageURL: nil, permitsMachineImport: true)
++            Section {
++                Button("Create Virtual Machine") {
++                    data.busyWorkAsync {
++                        try config.validate()
++                        _ = try await data.create(config: config)
++                        await MainActor.run { data.showNewVMSheet = false }
++                    }
++                }
++                .disabled(!canCreate || data.busy)
++                Text(config.engine == .windows ? "Choose a licensed Windows ARM64 ISO, or copy an existing complete machine folder. Start the saved machine from the UTM library." : "Create this machine, then start it from the UTM library to download or install macOS into its guest disk.")
++                    .font(.caption).foregroundStyle(.secondary)
++            }
++        }
++        .navigationTitle(config.engine.title)
++        .disabled(data.busy)
++        .overlay(BusyOverlay())
++        .onAppear {
++            if config.information.name == config.engine.title {
++                config.information.name = data.newDefaultVMName(base: config.engine.title)
++            }
++        }
++    }
++}
++
++private struct UTMNativeConfigurationFields: View {
++    @ObservedObject var config: UTMNativeConfiguration
++    let packageURL: URL?
++    let permitsMachineImport: Bool
++    @State private var choosingMedia = false
++    @State private var choosingMachine = false
++    @State private var importError: String?
++    @State private var memoryText = "4096"
++    @State private var memoryError: String?
++
++    private var currentMedia: String {
++        if let url = config.mediaImportURL { return url.lastPathComponent }
++        if let packageURL,
++           FileManager.default.fileExists(atPath: packageURL.appendingPathComponent("Data").appendingPathComponent(config.engine.mediaName).path) {
++            return config.engine.mediaName
++        }
++        return config.engine == .windows ? "No ISO selected" : "Download in the installer"
++    }
++
++    var body: some View {
++        Section {
++            NavigationLink {
++                VMConfigInfoView(config: $config.information).navigationTitle("Information")
++            } label: {
++                Label("Information", systemImage: "info.circle").labelStyle(.roundRectIcon)
++            }
++            NavigationLink {
++                Form {
++                    LabeledContent("Engine", value: config.engine.detail)
++                    LabeledContent("Architecture", value: "ARM64")
++                    TextField("Memory (MiB)", text: memoryBinding).keyboardType(.numberPad)
++                    LabeledContent("Selected memory", value: "\(config.memoryMiB) MiB")
++                    LabeledContent("Device upper limit", value: "\(config.maximumMemoryMiB) MiB")
++                    if let memoryError { Text(memoryError).foregroundStyle(.red) }
++                    Stepper("Virtual CPUs: \(config.cpuCount)", value: $config.cpuCount, in: 1...config.engine.maximumCPUs)
++                    Text("The device limit leaves 3 GiB for iPadOS and the app, up to an engine maximum of 16 GiB. A reservation can still fail if available memory, virtual address space or guest disk storage is insufficient. Close and reopen the app before switching engine families or starting another native session.")
++                        .font(.caption).foregroundStyle(.secondary)
++                }.navigationTitle("System")
++            } label: {
++                Label("System", systemImage: "cpu").labelStyle(.roundRectIcon)
++            }
++            NavigationLink {
++                Form {
++                    Section("Installation media") {
++                        LabeledContent(config.engine == .windows ? "Windows ARM64 ISO" : "macOS restore image", value: currentMedia)
++                        Button(config.engine == .windows ? "Choose Windows ARM64 ISO…" : "Choose macOS IPSW…") { choosingMedia = true }
++                        if permitsMachineImport {
++                            Button("Import Complete Machine Folder…") { choosingMachine = true }
++                            if let folder = config.machineImportURL { Text(folder.lastPathComponent).font(.caption) }
++                        }
++                        if let importError { Text(importError).foregroundStyle(.red) }
++                    }
++                    Section("Guest disk") {
++                        if config.engine == .windows && packageURL == nil && config.machineImportURL == nil {
++                            Stepper("Disk capacity: \(config.diskSizeGiB) GiB", value: $config.diskSizeGiB, in: 64...512, step: 64)
++                        } else {
++                            Text(config.engine == .macOS ? "Henge manages the guest disk and restore state in this UTM bundle." : "The engine uses the existing Windows disk, NVRAM and TPM state together.")
++                        }
++                        Text("Import copies the complete selected machine; source files are preserved. It does not convert an arbitrary QEMU or Apple VM into this engine.")
++                            .font(.caption).foregroundStyle(.secondary)
++                    }
++                }.navigationTitle("Drives")
++            } label: {
++                Label("Drives", systemImage: "externaldrive").labelStyle(.roundRectIcon)
++            }
++            NavigationLink {
++                Form {
++                    Picker("Resolution", selection: resolutionBinding) {
++                        Text("1280 × 720").tag("1280x720")
++                        Text("1920 × 1200").tag("1920x1200")
++                        Text("2560 × 1440").tag("2560x1440")
++                        Text("2752 × 2064").tag("2752x2064")
++                    }
++                    Text(config.engine == .windows ? "Windows uses the virtual 2D display and bundled VirtIO driver. Accelerated Direct3D is unavailable in this engine." : "macOS uses Henge's paravirtual GPU with Metal command replay. Compatibility depends on the guest release and workload.")
++                        .font(.caption).foregroundStyle(.secondary)
++                }.navigationTitle("Display")
++            } label: {
++                Label("Display", systemImage: "display").labelStyle(.roundRectIcon)
++            }
++            NavigationLink {
++                Form {
++                    Toggle("Enable networking", isOn: $config.networkEnabled)
++                    Text("Uses the selected engine's user-mode network adapter. Bridged networking and arbitrary QEMU adapter settings belong to QEMU machines.")
++                        .font(.caption).foregroundStyle(.secondary)
++                }.navigationTitle("Network")
++            } label: {
++                Label("Network", systemImage: "network").labelStyle(.roundRectIcon)
++            }
++            NavigationLink {
++                Form { Toggle("Enable audio", isOn: $config.audioEnabled) }.navigationTitle("Sound")
++            } label: {
++                Label("Sound", systemImage: "speaker.wave.2").labelStyle(.roundRectIcon)
++            }
++            NavigationLink {
++                Form {
++                    Text("Hardware keyboard and pointer input is handled by the selected engine's session controls. Onscreen controls overlay the guest display.")
++                    Text("Snapshots, pause/resume, disposable sessions and changing the virtual hardware model are unavailable for these two engines. QEMU machines retain their own full UTM settings.")
++                        .font(.caption).foregroundStyle(.secondary)
++                }.navigationTitle("Input and Capabilities")
++            } label: {
++                Label("Input and Capabilities", systemImage: "keyboard").labelStyle(.roundRectIcon)
++            }
++        }
++        .onAppear { memoryText = String(config.memoryMiB) }
++        .fileImporter(isPresented: $choosingMedia, allowedContentTypes: [UTType(filenameExtension: config.engine == .windows ? "iso" : "ipsw") ?? .data]) { result in
++            do { config.mediaImportURL = try result.get(); importError = nil }
++            catch { importError = error.localizedDescription }
++        }
++        .fileImporter(isPresented: $choosingMachine, allowedContentTypes: [.folder]) { result in
++            do { config.machineImportURL = try result.get(); importError = nil }
++            catch { importError = error.localizedDescription }
++        }
++    }
++
++    private var resolutionBinding: Binding<String> {
++        Binding(get: { "\(config.displayWidth)x\(config.displayHeight)" }, set: { value in
++            let components = value.split(separator: "x").compactMap { Int($0) }
++            if components.count == 2 { config.displayWidth = components[0]; config.displayHeight = components[1] }
++        })
++    }
++
++    private var memoryBinding: Binding<String> {
++        Binding(get: { memoryText }, set: { text in
++            memoryText = text
++            if let value = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)),
++               value >= 4096, value <= config.maximumMemoryMiB {
++                config.memoryMiB = value
++                memoryError = nil
++            } else {
++                config.memoryMiB = 0
++                memoryError = "Enter a whole number from 4096 to \(config.maximumMemoryMiB) MiB."
++            }
++        })
++    }
++}
++#endif
+diff --git a/Platform/Native/UTMNativeVirtualMachine.swift b/Platform/Native/UTMNativeVirtualMachine.swift
+new file mode 100644
+index 0000000..572ffa4
+--- /dev/null
++++ b/Platform/Native/UTMNativeVirtualMachine.swift
+@@ -0,0 +1,247 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#if os(iOS)
++import Foundation
++import SwiftUI
++import UIKit
++#if canImport(WindowsBackend)
++import WindowsBackend
++#endif
++#if canImport(HengeBackend)
++import HengeBackend
++#endif
++
++@MainActor enum UTMUnifiedEngineLease {
++    private(set) static var engine: String?
++    private(set) static var nativeID: UUID?
++    private static var prepared = false
++
++    static func claimQEMU() throws {
++        guard engine == nil || engine == "QEMU" else {
++            throw UTMNativeError.message("This launch has initialized an ARM64 engine. Close and reopen the app before starting a QEMU machine.")
++        }
++        engine = "QEMU"
++    }
++
++    static func claimNative(_ config: UTMNativeConfiguration) throws {
++        guard engine == nil || engine == config.engine.rawValue,
++              nativeID == nil || nativeID == config.information.uuid else {
++            throw UTMNativeError.message("Close and reopen the app before starting another machine or changing execution engines.")
++        }
++        engine = config.engine.rawValue
++        nativeID = config.information.uuid
++    }
++
++    static func prepareRequestedJIT() {
++        guard !prepared else { return }
++        prepared = true
++        guard let raw = ProcessInfo.processInfo.environment["UTM_NATIVE_ENGINE"],
++              let requested = UTMNativeEngine(rawValue: raw) else { return }
++        engine = requested.rawValue
++        switch requested {
++        case .windows:
++            #if canImport(WindowsBackend)
++            UTMWindowsBackend.prepareJIT()
++            #endif
++        case .macOS:
++            #if canImport(HengeBackend)
++            UTMHengeBackend.prepareJIT()
++            #endif
++        }
++    }
++}
++
++final class UTMNativeVirtualMachine: UTMVirtualMachine {
++    struct Capabilities: UTMVirtualMachineCapabilities {
++        var supportsProcessKill: Bool { false }
++        var supportsSnapshots: Bool { false }
++        var supportsScreenshots: Bool { false }
++        var supportsDisposibleMode: Bool { false }
++        var supportsRecoveryMode: Bool { false }
++        var supportsRemoteSession: Bool { false }
++    }
++    static let capabilities = Capabilities()
++
++    private(set) var pathUrl: URL
++    let isShortcut: Bool
++    var isRunningAsDisposible: Bool { false }
++    weak var delegate: (any UTMVirtualMachineDelegate)?
++    var onConfigurationChange: (() -> Void)?
++    var onStateChange: (() -> Void)?
++    private(set) var config: UTMNativeConfiguration { didSet { onConfigurationChange?() } }
++    private(set) var registryEntry: UTMRegistryEntry { didSet { onConfigurationChange?() } }
++    private(set) var state: UTMVirtualMachineState = .stopped {
++        didSet {
++            onStateChange?()
++            delegate?.virtualMachine(self, didTransitionToState: state)
++        }
++    }
++    var screenshot: UTMVirtualMachineScreenshot? { didSet { onStateChange?() } }
++    var snapshotUnsupportedError: Error? { UTMNativeError.message("This ARM64 engine does not support saved-state snapshots or suspension.") }
++    var isHeadless: Bool { false }
++    private var isScopedAccess: Bool
++    private var hasStarted = false
++    private var sessionPresentation: UIViewController?
++    private let sessionStatus = UTMNativeSessionStatus()
++    var isConfigurationEditable: Bool { state == .stopped && sessionPresentation == nil }
++
++    @MainActor required init(packageUrl: URL, configuration: UTMNativeConfiguration, isShortcut: Bool) throws {
++        try configuration.validate()
++        self.pathUrl = packageUrl
++        self.config = configuration
++        self.isShortcut = isShortcut
++        self.isScopedAccess = packageUrl.startAccessingSecurityScopedResource()
++        self.registryEntry = UTMRegistryEntry.empty
++        self.registryEntry = loadRegistry()
++        self.screenshot = loadScreenshot()
++    }
++
++    deinit { if isScopedAccess { pathUrl.stopAccessingSecurityScopedResource() } }
++
++    @MainActor func reload(from packageUrl: URL?) throws {
++        guard state == .stopped, sessionPresentation == nil else {
++            throw UTMNativeError.message("Close and reopen the app before reloading a machine whose engine has been initialized.")
++        }
++        let url = packageUrl ?? pathUrl
++        guard let configuration = try UTMNativeConfiguration.load(from: url) as? UTMNativeConfiguration else {
++            throw UTMConfigurationError.invalidBackend
++        }
++        if isScopedAccess { pathUrl.stopAccessingSecurityScopedResource() }
++        pathUrl = url
++        isScopedAccess = url.startAccessingSecurityScopedResource()
++        config = configuration
++    }
++
++    @MainActor func changeUuid(to uuid: UUID, name: String?, copyingEntry entry: UTMRegistryEntry?) {
++        config.information.uuid = uuid
++        if let name { config.information.name = name }
++        registryEntry = UTMRegistry.shared.entry(for: self)
++        if let entry { registryEntry.update(copying: entry) }
++    }
++
++    func updateConfigFromRegistry() {}
++
++    @MainActor func start(options: UTMVirtualMachineStartOptions) async throws {
++        guard options.isEmpty else { throw UTMNativeError.message("Disposable, recovery and remote starts are unavailable for this engine.") }
++        if state != .stopped { return }
++        guard !hasStarted, sessionPresentation == nil else {
++            throw UTMNativeError.message("This engine session has ended. Close and reopen the app before starting it again.")
++        }
++        try config.validate()
++        try UTMUnifiedEngineLease.claimNative(config)
++        state = .starting
++    }
++
++    @MainActor func stop(usingMethod method: UTMVirtualMachineStopMethod) async throws {
++        guard state != .stopped else { return }
++        state = .stopping
++        switch config.engine {
++        case .windows:
++            #if canImport(WindowsBackend)
++            UTMWindowsBackend.requestStop(force: method != .request)
++            #endif
++        case .macOS:
++            #if canImport(HengeBackend)
++            UTMHengeBackend.requestStop(force: method != .request)
++            #endif
++        }
++    }
++
++    func restart() async throws { throw UTMNativeError.message("Use Shut Down in the guest, then close and reopen the app before restarting this engine.") }
++    func pause() async throws { throw UTMNativeError.message("Pausing this ARM64 engine is not supported.") }
++    func resume() async throws { throw UTMNativeError.message("Resuming this ARM64 engine is not supported.") }
++    func reloadScreenshotFromFile() throws { screenshot = loadScreenshot() }
++
++    @MainActor func presentSession() throws {
++        if let presentation = sessionPresentation {
++            if presentation.presentingViewController == nil { Self.presenter()?.present(presentation, animated: true) }
++            return
++        }
++        let callback: (String, String?) -> Void = { [weak self] state, message in
++            Task { @MainActor in self?.engineStateChanged(state, message: message) }
++        }
++        let controller: UIViewController
++        switch config.engine {
++        case .windows:
++            #if canImport(WindowsBackend)
++            controller = UTMWindowsBackend.makeViewController(packageURL: pathUrl, configuration: config.engineConfiguration(for: pathUrl), stateChanged: callback)
++            #else
++            throw UTMNativeError.message("The Windows ARM64 backend is missing from this build.")
++            #endif
++        case .macOS:
++            #if canImport(HengeBackend)
++            controller = UTMHengeBackend.makeViewController(packageURL: pathUrl, configuration: config.engineConfiguration(for: pathUrl), stateChanged: callback)
++            #else
++            throw UTMNativeError.message("The Henge macOS backend is missing from this build.")
++            #endif
++        }
++        let presentation = UIHostingController(rootView: UTMNativeSessionView(controller: controller, status: sessionStatus) { [weak self] in
++            self?.sessionPresentation?.dismiss(animated: true)
++        })
++        presentation.modalPresentationStyle = .fullScreen
++        sessionPresentation = presentation
++        guard let presenter = Self.presenter() else {
++            sessionPresentation = nil
++            state = .stopped
++            throw UTMNativeError.message("No active app window is available for this session.")
++        }
++        presenter.present(presentation, animated: true)
++    }
++
++    @MainActor private func engineStateChanged(_ event: String, message: String?) {
++        switch event {
++        case "started": hasStarted = true; state = .started
++        case "starting": state = .starting
++        case "stopped":
++            state = .stopped
++            if let message { sessionStatus.message = message }
++        case "error":
++            state = .stopped
++            if let message {
++                sessionStatus.message = message
++                delegate?.virtualMachine(self, didErrorWithMessage: message)
++            }
++        default: break
++        }
++    }
++
++    @MainActor private static func presenter() -> UIViewController? {
++        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
++        let window = scenes.first(where: { $0.activationState == .foregroundActive })?.windows.first(where: \.isKeyWindow)
++        var controller = window?.rootViewController
++        while let presented = controller?.presentedViewController { controller = presented }
++        return controller
++    }
++}
++
++private struct UTMNativeControllerView: UIViewControllerRepresentable {
++    let controller: UIViewController
++    func makeUIViewController(context: Context) -> UIViewController { controller }
++    func updateUIViewController(_ controller: UIViewController, context: Context) {}
++}
++
++private final class UTMNativeSessionStatus: ObservableObject {
++    @Published var message: String?
++}
++
++private struct UTMNativeSessionView: View {
++    let controller: UIViewController
++    @ObservedObject var status: UTMNativeSessionStatus
++    let close: () -> Void
++    var body: some View {
++        UTMNativeControllerView(controller: controller)
++            .ignoresSafeArea()
++            .overlay(alignment: .topLeading) {
++                Button(action: close) { Label("UTM Library", systemImage: "chevron.backward") }
++                    .font(.callout).padding(10)
++                    .background(.ultraThinMaterial, in: Capsule()).padding(8)
++                    .accessibilityHint("Return to the library while keeping this guest session open.")
++            }
++            .alert("Virtual Machine", isPresented: Binding(get: { status.message != nil }, set: { if !$0 { status.message = nil } })) {
++                Button("OK") { status.message = nil }
++            } message: {
++                Text(status.message ?? "")
++            }
++            .statusBarHidden(true)
++    }
++}
++#endif

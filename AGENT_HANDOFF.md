@@ -10,13 +10,31 @@ may update documentation without changing that implementation baseline.
 
 ## User instructions that continue to apply
 
+- **Newest target:** one actual UTM frontend with the existing Windows ARM64
+  engine and Henge's macOS/IPSW engine embedded as isolated frameworks. The
+  earlier companion-app hub did not meet this request. See
+  [UTM ARM Lab](docs/UNIFIED_UTM.md). The user also reported invisible but
+  clickable macOS controls/Safari popovers, flickering, and Magic Keyboard
+  multitouch cursor jumps with excessive scrolling. Framework integration,
+  input fixes and the Metal texture-alignment path are the active work.
+
+- **Latest scope:** the user explicitly authorized UTM/Henge source cloning,
+  dependency builds, iPad app installation, IPSW download and macOS guest
+  restore/execution. This supersedes the earlier build-only restriction for
+  the virtualization research. macOS Sequoia has now restored and booted on
+  the M5 iPad with 6144 MiB RAM and Metal display replay. The user explicitly
+  chose **to complete account setup personally**; leave Setup Assistant and
+  do not create an account. Automatic Henge commands have been cleared.
+  See [research results](docs/VIRTUALIZATION_RESEARCH.md) before device actions.
 - Target **Windows 11 24H2 ARM64**. The original “24H4” request was explicitly
   corrected to 24H2.
-- **Build only on this Mac.** The user explicitly prohibited tests, debugging,
+- **Earlier Windows-only scope was build only.** The user had prohibited tests, debugging,
   profiling, simulator execution and VM execution because the Mac lacks the
   necessary processing power. Keep compiler concurrency at **`JOBS=2`**.
-  Do not start an app, device session, LLDB helper or guest automatically. The
-  user runs the Mac launcher and supplies its results.
+  This remains the historical boundary for the older evidence; the newer
+  research authorization above permits its explicit device actions. Preserve
+  active guests and unsaved state. Do not replace the original Windows app
+  while its Windows VM is running.
 - Normal setup must require **only the user's Windows installation ISO**.
   Bundle redistributable firmware, the matching fresh UEFI variable template,
   TPM dependencies and ARM64 network/display driver media in the app. Create
@@ -32,6 +50,35 @@ may update documentation without changing that implementation baseline.
   Internet access, input or resolution results as verified.
 
 ## Current result and boundaries
+
+**Newest result:** `distribution/unified/UTM.app` and `UTM-ARM-Lab.ipa` are
+the signed **UTM ARM Lab** app (`com.thomas20090425.unifiedresearch.UTM`),
+using UTM's actual frontend with embedded `WindowsBackend.framework` and
+`HengeBackend.framework`. Final IPA SHA-256:
+`60779822a7c989bc1182576ffd26d4b071d4f49b7093b251e3cdb0f83bc0d026`.
+Native `.utm` creation/settings/session routing, prepared-folder imports,
+exact RAM handling, engine-family process leases and framework-aware JIT
+launch are implemented. The Henge renderer now uses canonical aligned
+backing and ordered GPU row copies instead of empty textures for packed
+layouts. Physical trackpad scrolling accumulates fractional samples and
+large pointer movement is packetized. Source/model/Metal checks and both
+isolated framework builds pass; **unified device runtime remains unverified**.
+See [UTM ARM Lab](docs/UNIFIED_UTM.md).
+
+The final build has not been installed. A read-only screenshot showed the
+user's current Henge guest running Geekbench; status/logs confirmed 8192 MiB
+and completed manual account setup. Do not terminate or replace that active
+app. A pending user question asks whether macOS has shut down so installation
+and verification can proceed. It has not been answered as of this record.
+
+Earlier UTM and Henge are separately built, signed and installed reference apps.
+UTM has its complete QEMU/SPICE dependencies; Henge restored Sequoia 15.6.1
+from Apple and booted to Setup Assistant with a verified 6 GiB guest mapping.
+WindowsiOS adds nine settings pages, rename/notes/search and a companion
+Engines hub; its update is staged because the installed Windows VM reports
+running. These are separate app containers and runtimes, not a merged QEMU
+or Henge backend inside WindowsiOS. Full details and pinned rebuild recipes
+are in `docs/VIRTUALIZATION_RESEARCH.md` and `research/`.
 
 The latest universal arm64 device app compiles and packages with bundled UEFI,
 software TPM 2.0, and official ARM64 VirtIO drivers. Native UI configuration is
@@ -187,6 +234,30 @@ addresses are guest `10.0.2.15`, gateway `10.0.2.2`, DNS `10.0.2.3`.
 Backend/link readiness is not evidence of Internet traffic.
 
 ## Build, artifacts and owner-run procedures
+
+RAM admission follow-up: a read-only copy of the connected original app's
+`Documents/boot_status.txt` is `build/ipad-memory-failure-status.txt` (JIT live,
+guest reservation0, available4698MiB). The obsolete guest+1024MiB process gate
+prevented even4GiB from reaching the real allocator. It is replaced by an exact
+early reservation plus an engine-only1024MiB process-headroom check. Fallback
+storage is fully preallocated before a lazy MAP_SHARED mapping; failures retain
+prior reservations and return exact stage/errno. No engine starts on mapping
+failure. The original-ID build uses MEMORY_CAPABILITIES=NO and lives under
+`distribution/reservation-fixed-original/`; the entitled variant remains under
+`distribution/memory-enabled/`. See installation guide for both commands.
+Device interaction for this diagnosis was reading metadata and existing status
+only; no app/VM/debugger launch or RAM allocation was initiated.
+
+Latest memory-capability variant: `distribution/memory-enabled/WindowsiOS.app`
+and IPA, display name **Windows 11 RAM**, bundle `com.thomas20090425.windowsios`.
+The available team could not register `me.ammaar.windowsios`; the new explicit
+profile and app signature both grant Increased Memory Limit and Extended
+Virtual Addressing. Build log: `build/logs/memory-enabled-build.log` (signed
+Release, two workers, Xcode/SDK 27.2). Original distribution artifacts remain
+unchanged. The owner must copy whole VM folders into the separate app container
+and launch JIT with the new bundle ID and local app path. See the installation
+guide's memory section. No iPad/runtime allocation was performed. A 16 GiB
+host has a 13 GiB physical-policy guest ceiling; actual OS allowance is separate.
 
 The latest display/keyboard correction built in signed Release with two workers
 on Xcode 27.2 / iOS SDK 27.2; log:
@@ -371,9 +442,9 @@ also present in history. Use `git show COMMIT` to inspect a particular change.
    snapshots, suspend/resume, 3D acceleration and Ink digitizer reports are
    separate unfinished work, not hidden capabilities.
 
-Do not start a broad runtime-validation campaign on this Mac. Continue from
-the user's supplied result or requested feature, with build-only checks for
-new code and documentation updated to match the actual evidence.
+The earlier build-only campaign restriction is superseded for the explicitly
+authorized UTM/macOS research. Keep runtime work scoped, preserve the user's
+running Windows guest, and leave macOS account setup to the user as requested.
 
 ## Copy-paste prompt for another agent
 
@@ -384,18 +455,28 @@ git status/log so later work is preserved. The implementation baseline is
 661b8ae, with native iPad/ISO-only setup, bundled UEFI/TPM/ARM64 drivers,
 custom RAM, mouse/F-key fixes, NAT and VirtIO GPU 2D/native/dynamic modes.
 
-Persistent instructions: Windows 11 24H2 ARM64; build only with JOBS=2 on
-this weak Mac. No tests, debugger, simulator, profiling, app/device/VM launch
-unless the user explicitly changes that instruction. The user runs the Mac
-JIT launcher. Do not require firmware/vars imports or claim verified guest
-results. Pencil is pointer-only; GPU is 2D, not accelerated 3D. Preserve TPM
-state with disk/NVRAM, and the current full-app-relaunch requirement.
+Persistent instructions: Windows 11 24H2 ARM64; build with JOBS=2. The user
+later explicitly authorized UTM/Henge builds, device installs, JIT and macOS
+restore/execution. Newest target is one actual UTM frontend with embedded
+Windows and Henge engines; read docs/UNIFIED_UTM.md first. The signed final
+distribution/unified/UTM.app and UTM-ARM-Lab.ipa build passed, with native
+configuration, trackpad and aligned Metal texture fixes. This unified build
+has not been installed or guest-tested yet. Its bundle ID is
+com.thomas20090425.unifiedresearch.UTM. scripts/launch_unified_on_device.sh
+selects windows or macos and resolves that engine's framework UUID/symbols.
 
-The old serial JIT baseline was 22–32 minutes. Owned batched USB preparation
-and the f82c1aa asynchronous connect fix exist, but no post-fix user timing,
-detach or Windows boot result has been reported. Obtain the user's newest
-launcher/device result for the matching installed build, or their next
-feature goal, before choosing runtime work. Do not launch it yourself.
+The earlier standalone Henge has Sequoia 15.6.1 on the M5 iPad. The user
+completed account setup and was last observed actively running Geekbench
+with 8192 MiB. Do not terminate that app or install over it while running.
+A pending question asks if the Mac has shut down so unified installation and
+device verification can proceed. Do not create an account or replay setup
+commands. Original Windows VM was also running, so its UI update remains staged.
+Preserve both guests. Windows GPU remains2D; Henge Metal replay is a separate
+engine, not a Windows GPU improvement. Preserve disk/NVRAM/TPM identity.
+
+The older serial JIT baseline is historical. The new Henge-specific Mac
+launcher completed batched 512 MiB JIT preparation, RX self-test returning 42 and detach
+on this iPad. Do not generalize it to a Windows benchmark or full GPU support.
 Build outputs and logs are ignored, so another checkout must rebuild its
 own signed app. Build.command is the download/double-click entry point after
 full Xcode and Homebrew are installed; it defaults to two workers and an

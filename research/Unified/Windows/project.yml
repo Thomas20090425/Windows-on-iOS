@@ -1,0 +1,90 @@
+name: WindowsBackend
+options:
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    CODE_SIGNING_ALLOWED: NO
+targets:
+  WindowsBackend:
+    type: framework
+    platform: iOS
+    sources:
+      - path: UTMWindowsBackend.swift
+      - path: WindowsBackend.h
+        headerVisibility: public
+      - path: ../../../ios/Sources/Native/winios_bridge.h
+        headerVisibility: public
+      - path: ../../../ios/Sources/Native/winios_jit.h
+        headerVisibility: public
+      - path: ../../../ios/Sources/Native/winios_bridge.m
+      - path: ../../../ios/Sources/Native/winios_jit.c
+      - path: ../../../ios/Sources/Native/winios_brk.S
+      - path: ../../../ios/Sources/VMViewModel.swift
+      - path: ../../../ios/Sources/VMConfiguration.swift
+      - path: ../../../ios/Sources/VMMachineSetup.swift
+      - path: ../../../ios/Sources/WindowsInstallationMedia.swift
+      - path: ../../../ios/Sources/MetalDisplayView.swift
+      - path: ../../../ios/Sources/HardwareInput.swift
+      - path: ../../../ios/Sources/HingeSensorView.swift
+      - path: ../../../ios/Sources/IPadSessionView.swift
+      - path: ../../../ios/Sources/Resources/henge-jit.js
+        buildPhase: resources
+      - path: ../../../build/firmware/Firmware
+        type: folder
+        buildPhase: resources
+      - path: ../../../build/WindowsDrivers
+        type: folder
+        buildPhase: resources
+      - path: ../../../ios/deps/licenses/TPM
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.thomas20090425.unified.WindowsBackend
+        PRODUCT_NAME: WindowsBackend
+        DEFINES_MODULE: YES
+        SKIP_INSTALL: NO
+        BUILD_LIBRARY_FOR_DISTRIBUTION: YES
+        EXPORTED_SYMBOLS_FILE: $(SRCROOT)/exports.txt
+        GCC_SYMBOLS_PRIVATE_EXTERN: NO
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/../../../core
+          - $(SRCROOT)/../../../host
+          - $(SRCROOT)/../../../devices
+          - $(SRCROOT)/../../../ios/deps/include
+          - $(SRCROOT)/../../../ios/Sources/Native
+        LIBRARY_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/../../../build/ios
+          - $(SRCROOT)/../../../ios/deps/lib
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -lwinvm
+          - -ltpms
+          - -lcrypto
+          - -lslirp
+          - -lglib-2.0
+          - -lintl
+          - -lpcre2-8
+          - -lffi
+          - -lresolv
+          - -liconv
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - sdk: UIKit.framework
+      - sdk: SwiftUI.framework
+      - sdk: GameController.framework
+      - sdk: AVFoundation.framework
+      - sdk: SafariServices.framework
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: AudioToolbox.framework
+      - sdk: CoreGraphics.framework
+      - sdk: ImageIO.framework
+      - sdk: UniformTypeIdentifiers.framework

@@ -40,7 +40,12 @@ case "$TRANSPORT" in
     xcode) ;;
     *) echo "WINIOS_JIT_TRANSPORT must be batch (default) or xcode." >&2; exit 1 ;;
 esac
+launch_environment=()
+if [[ -f "$LOCAL_APP/Frameworks/WindowsBackend.framework/WindowsBackend" ]]; then
+    launch_environment=(--environment-variables '{"UTM_NATIVE_ENGINE":"WindowsARM64"}')
+fi
 xcrun devicectl device process launch --start-stopped --terminate-existing \
+    "${launch_environment[@]}" \
     --device "$DEVICE" --json-output "$LAUNCH_JSON" "$BUNDLE_ID"
 read -r PID CORE_ID < <(python3 - "$LAUNCH_JSON" "$DEVICE" <<'PY'
 import json, sys

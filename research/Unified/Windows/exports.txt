@@ -1,0 +1,8 @@
+_$s14WindowsBackend*
+_OBJC_CLASS_$_UTMWindowsBackend
+_OBJC_METACLASS_$_UTMWindowsBackend
+_OBJC_CLASS_$_WinIOSBridge
+_OBJC_METACLASS_$_WinIOSBridge
+_winios_*
+_WindowsBackendVersionNumber
+_WindowsBackendVersionString

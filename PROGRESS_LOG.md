@@ -1,9 +1,27 @@
 # Engineering progress — 2026-11-15
 
+Latest delivery: one signed **UTM ARM Lab** app now embeds the existing Windows
+ARM64 engine and Henge's macOS/IPSW engine behind UTM's actual frontend.
+Native bundles/settings/imports and VM-specific session routes replace the
+separate-app hub as the requested target. Built final IPA:
+`distribution/unified/UTM-ARM-Lab.ipa`, SHA-256
+`60779822a7c989bc1182576ffd26d4b071d4f49b7093b251e3cdb0f83bc0d026`.
+Both framework export boundaries and exact-image JIT manifests pass. Added
+fractional physical-trackpad scrolling, signed movement packetization,
+direct-touch filtering, canonical aligned Metal texture backing with ordered
+guest/GPU synchronization, and retained-session/restore shutdown handling.
+Configuration/import/error-path checks, focused input checks and real Metal
+tests pass. Device installation and guest validation are pending because the
+current Henge Mac is actively running the user's Geekbench workload. See
+[the unified integration record](docs/UNIFIED_UTM.md).
+
 Target clarified by user: Windows 11 **24H2** ARM64 (not “24H4”).
 User subsequently requested **compilation only**, with no tests, VM execution,
 profiling or debugger use on this Mac. Later additions: Apple Pencil input and
 UTM-informed, engine-backed VM configuration.
+The subsequent UTM/macOS research request explicitly authorized dependency
+builds, device installation, JIT and macOS guest restoration/execution. This
+later authorization supersedes the earlier compile-only research boundary.
 The user then corrected setup requirements: **Windows ISO only**, firmware
 bundled with the app, automatic private NVRAM, and app-created writable disks.
 The user subsequently reported a start-time `EXC_BREAKPOINT` in the JIT
@@ -17,6 +35,35 @@ was advancing slowly, projecting 22.2 minutes at that measured rate.
 
 ## Completed source work
 
+- Cloned pinned UTM and Henge. Built and installed full UTM using its official
+  QEMU/SPICE sysroot and a separate source-built Henge app. Added Windows
+  settings navigation (nine categories), validated draft Save/Cancel,
+  rename/notes/search and an Engines companion launcher. Pinned build recipes,
+  patches, source manifests and license/provenance receipts are retained.
+- On the M5 iPad, Henge JIT's generated-code check returned 42 and detached;
+  Sequoia 15.6.1 downloaded from Apple, restored successfully, and booted a 6 GiB
+  guest with Metal/PVG graphics to Setup Assistant. The user chose to complete
+  account setup personally. Automatic guest commands were cleared. The active
+  original Windows VM was not terminated or updated. Details/evidence:
+  `docs/VIRTUALIZATION_RESEARCH.md`.
+- Fixed a confirmed false RAM rejection: the connected original app's saved
+  diagnostics showed JIT live, 0 MiB guest reservation and 4698 MiB process
+  headroom, while the old gate demanded 5120 MiB for a 4096 MiB guest. Startup
+  now reserves the actual exact-size mapping before engine creation, requiring
+  only engine headroom for the file-backed path. The fallback uses a unique
+  temporary file with all storage reserved, lazy shared mapping, explicit
+  errors and no silent anonymous fallback. Failed replacements retain the
+  prior mapping; sizes can be retried before engine creation. Added a build
+  switch to omit optional capabilities for the original app ID/profile.
+- Added Increased Memory Limit and Extended Virtual Addressing to the source
+  signing recipe. The original bundle ID was unavailable to this Mac's team,
+  so a separate Windows 11 RAM variant uses com.thomas20090425.windowsios and
+  an explicit profile granting both entitlements. Original distribution
+  artifacts and the installed app remain untouched. The 16 GiB device's
+  physical admission policy already allows 13 GiB; the roughly 5 GiB symptom
+  instead needs process-budget/reservation evidence. Added separate memory
+  diagnostics and exact admission errors, stopped eager full-file prefault on
+  iOS and made RAM-metadata allocation failure stop startup.
 - Made the F1–F12 row default-hidden behind a floating F keys button. It opens
   over the guest viewport and has a hide arrow; it no longer occupies a bottom
   inset or resizes Windows. Typing keyboard is separate, and the iPad viewport
@@ -166,8 +213,23 @@ was advancing slowly, projecting 22.2 minutes at that measured rate.
   debugger or tests ran. Guest topology selection and keyboard interaction
   remain unverified on the user's device.
 
+- The memory-enabled variant built and signed with Xcode 27.2 / iOS SDK 27.2,
+  two workers; log: `build/logs/memory-enabled-build.log`. Both memory grants
+  were verified in the app signature and explicit embedded profile; signature,
+  IPA integrity, local symbol metadata and original-artifact preservation
+  checks passed. Outputs are in `distribution/memory-enabled/`. Different app
+  identity requires owner-run VM folder copying before reuse. No iPad install,
+  RAM allocation, debugger, VM, simulator or tests ran for this change.
+
 ## Remaining external/runtime work
 
+- Corrected reservation builds passed in signed Release for both original and
+  memory-capability IDs. Logs: `build/logs/reservation-fixed-original-build.log`
+  and `build/logs/reservation-fixed-memory-build.log`. App signatures, embedded
+  capability grants/omissions, IPA integrity and local JIT metadata were checked.
+  Original-ID fix is in `distribution/reservation-fixed-original/`; entitled
+  fix is in `distribution/memory-enabled/`. Device work was read-only app listing
+  and copying existing boot_status.txt; no app/VM launch or allocation ran.
 - Install on an appropriately provisioned iPad; verify the JIT trap protocol,
   actual memory behavior, UEFI/Windows boot, physical input and guest I/O.
 - No agent-run iPad/Duo runtime validation was performed under the build-only

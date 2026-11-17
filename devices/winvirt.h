@@ -89,6 +89,13 @@ typedef struct HvWinVirt {
 } HvWinVirt;
 
 uint8_t *hv_alloc_no_footprint(uint64_t size);
+/* Reserve all backing-file storage and a lazy shared virtual mapping. Success
+ * does not commit size bytes of physical RAM. Unmap with munmap(ptr, size).
+ * path_template may end in XXXXXX or be a filename prefix; no file is replaced.
+ * Returns NULL with a stage/errno diagnostic on failure, never a sparse or
+ * anonymous fallback. The temporary file has mode 0600 and is unlinked. */
+uint8_t *hv_alloc_file_backed_ram(uint64_t size, const char *path_template,
+                                 char *error, size_t error_size);
 int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_t ram_size,
                       void *prealloc_ram, const char *code_fd_path, const char *vars_fd_path,
                       HvDisk *disk0, HvDisk *disk1, const uint8_t mac[6], int enable_sound,

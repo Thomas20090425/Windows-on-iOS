@@ -1,0 +1,20 @@
+{
+  "repository": "https://github.com/utmapp/UTM",
+  "source_commit": "5d5e1b180be867c795bbeb03ed80087518c0cdae",
+  "native_dependencies": {
+    "source": "official GitHub Actions Sysroot-ios-arm64 artifact",
+    "release": "v5.0.8",
+    "release_source_commit": "535d6592a8bdc22b48de53703a371b80bf60d587",
+    "workflow_run_id": 38996133972,
+    "artifact_id": 12087377615,
+    "artifact_url": "https://github.com/utmapp/UTM/actions/runs/38996133972/artifacts/12087377615",
+    "zip_sha256": "d200793cd39b77c459971e024ae37603ea8b47f0cd813240141f0afb9ef40811",
+    "download_requires": "GitHub Actions artifact access through the connected GitHub tool or authenticated GitHub CLI; UTM_SYSROOT_ZIP also accepts a downloaded archive."
+  },
+  "build_script": "scripts/build_utm_reference.sh",
+  "default_bundle_identifier": "com.thomas20090425.research.UTM",
+  "default_helper_identifier": "com.thomas20090425.research.UTM.iOSHelper",
+  "license": "UTM frontend Apache-2.0; QEMU, SPICE and other components retain their respective upstream licenses. The build preserves UTM's bundled notices and native dependency documentation.",
+  "scope": "A separate complete UTM iOS reference app; this does not embed QEMU or arbitrary .utm execution into WindowsiOS.",
+  "compatibility": "Current pinned frontend is compiled against the official v5.0.8 native sysroot. Source/signature verification does not establish guest runtime compatibility. Apple Virtualization.framework macOS guests remain macOS-host-only; iPad macOS work uses the separate Henge software engine."
+}
